@@ -10,12 +10,19 @@ v prohlížeči — žádná data se nikam neposílají.
 - Inspektor surového 128znakového záznamu s vyznačenými poli
 - Podpora souborů s více výpisy (více vět `074`)
 
+**Převod PDF → GPC** (`/prevod.html`): nahraješ PDF výpis z Raiffeisenbank, text
+se vytáhne přes pdf.js přímo v prohlížeči (nic se nikam neposílá), rozparsuje se
+hlavička i pohyby, ověří se rekonciliace (příjmy/výdaje vs. konečný zůstatek)
+a vygeneruje se GPC v CP1250 ke stažení. Panel „Rozpoznaný text" slouží k ladění,
+kdyby jiný výpis nesedl.
+
 ## Struktura
 
 ```
 abo-gpc-viewer/
 ├── public/
-│   └── index.html    # samotný viewer (funguje i sám o sobě)
+│   ├── index.html    # prohlížeč GPC výpisů (funguje i sám o sobě)
+│   └── prevod.html   # převod PDF (Raiffeisenbank) → GPC, celý v prohlížeči
 ├── server.js         # nulové závislosti, servíruje public/
 ├── package.json      # npm start -> node server.js
 ├── railway.json      # start command + healthcheck /healthz
