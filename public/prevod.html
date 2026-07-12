@@ -1,0 +1,428 @@
+<!-- PDF -> GPC converter — client-side, offline. Raiffeisenbank statement layout. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF → GPC · převod výpisu</title>
+<style>
+  :root{
+    --paper:#FBFBFD; --panel:#FFFFFF; --ink:#171B26; --ink-2:#3A4152;
+    --muted:#7A8296; --line:#E6E8EF; --line-2:#EFF1F6;
+    --accent:#3B3F8F; --kredit:#0F7A52; --kredit-bg:#EAF6F0;
+    --debet:#B03A2E; --debet-bg:#FBEDEA;
+    --mono:"JetBrains Mono","SF Mono",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+    --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.45;
+       -webkit-font-smoothing:antialiased;padding:0 0 72px}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 20px}
+  header.top{border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:20}
+  .top .wrap{display:flex;align-items:center;gap:16px;height:60px}
+  .brand{display:flex;align-items:baseline;gap:10px;font-weight:700;letter-spacing:-.02em;font-size:16px}
+  .brand .tag{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--accent);
+       border:1px solid var(--accent);border-radius:5px;padding:1px 6px;letter-spacing:.04em}
+  .top .spacer{flex:1}
+  .navlink{font-weight:600;font-size:13px;color:var(--ink-2);text-decoration:none;padding:8px 10px;border-radius:8px}
+  .navlink:hover{background:var(--line-2);color:var(--ink)}
+  .btn{font:inherit;font-weight:600;font-size:13px;border:1px solid var(--line);background:var(--panel);
+       color:var(--ink);padding:8px 14px;border-radius:8px;cursor:pointer;transition:.12s;text-decoration:none;display:inline-block}
+  .btn:hover{border-color:var(--ink-2)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.ok{background:var(--kredit);border-color:var(--kredit);color:#fff}
+  .btn.ghost{border-color:transparent;color:var(--muted)}
+  .btn.ghost:hover{color:var(--ink);background:var(--line-2)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  input[type=file]{display:none}
+
+  /* stepper as the signature: a 3-stage pipeline PDF -> kontrola -> GPC */
+  .pipe{display:flex;align-items:center;gap:10px;margin:26px 0 6px;font-family:var(--mono);font-size:12px}
+  .pipe .node{display:flex;align-items:center;gap:8px;padding:7px 13px;border:1px solid var(--line);border-radius:22px;
+       background:var(--panel);color:var(--muted);font-weight:600}
+  .pipe .node.on{border-color:var(--accent);color:var(--accent);background:#F5F5FD}
+  .pipe .node.done{border-color:var(--kredit);color:var(--kredit);background:var(--kredit-bg)}
+  .pipe .arr{color:var(--line);font-weight:700}
+
+  .drop{margin:16px 0 0;border:1.5px dashed var(--line);border-radius:16px;background:var(--panel);
+        padding:52px 24px;text-align:center;transition:.15s}
+  .drop.hot{border-color:var(--accent);background:#F5F5FD}
+  .drop h1{margin:0 0 6px;font-size:22px;letter-spacing:-.02em}
+  .drop p{margin:0 auto;max-width:560px;color:var(--muted)}
+  .drop .actions{margin-top:22px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+  .status{margin-top:18px;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+
+  .err{margin:18px 0;padding:14px 16px;border:1px solid var(--debet);background:var(--debet-bg);
+       color:var(--debet);border-radius:10px;font-size:13px}
+
+  /* result */
+  .result{margin:22px 0 0}
+  .recon-card{display:flex;align-items:center;gap:16px;padding:16px 20px;border-radius:12px;margin-bottom:16px;
+       border:1px solid var(--line);background:var(--panel)}
+  .recon-card.ok{border-color:var(--kredit);background:var(--kredit-bg)}
+  .recon-card.bad{border-color:var(--debet);background:var(--debet-bg)}
+  .recon-card .big{font-size:22px;font-weight:800;font-family:var(--mono)}
+  .recon-card.ok .big{color:var(--kredit)} .recon-card.bad .big{color:var(--debet)}
+  .recon-card .detail{font-size:12.5px;color:var(--ink-2);font-family:var(--mono);line-height:1.7}
+  .recon-card .cta{margin-left:auto;display:flex;gap:10px}
+
+  .head-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line-2);
+       border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:18px}
+  .head-grid .cell{background:var(--panel);padding:12px 16px}
+  .head-grid .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+  .head-grid .val{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600;font-size:16px;margin-top:2px}
+  .head-grid .val.deb{color:var(--debet)} .head-grid .val.kre{color:var(--kredit)}
+  .head-meta{font-family:var(--mono);font-size:12.5px;color:var(--ink-2);margin-bottom:14px}
+  .head-meta b{color:var(--ink)}
+
+  .tablewrap{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel)}
+  table{width:100%;border-collapse:collapse}
+  thead th{background:var(--panel);text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.06em;
+       color:var(--muted);font-weight:700;padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+  thead th.num{text-align:right}
+  tbody tr{border-bottom:1px solid var(--line-2)}
+  td{padding:9px 14px;vertical-align:top}
+  td.date{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--ink-2);white-space:nowrap;font-size:13px}
+  td.party{font-weight:600;max-width:280px}
+  td.sym{font-family:var(--mono);font-size:12.5px;color:var(--ink-2);white-space:nowrap}
+  td.amount{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
+  td.amount.pos{color:var(--kredit)} td.amount.neg{color:var(--debet)}
+
+  details.debug{margin:18px 0 0;border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
+  details.debug summary{cursor:pointer;padding:12px 16px;font-weight:600;font-size:13px;color:var(--ink-2);user-select:none}
+  details.debug pre{margin:0;padding:14px 16px;border-top:1px solid var(--line-2);background:#0F1420;color:#C6CBDB;
+       font-family:var(--mono);font-size:11.5px;line-height:1.7;max-height:340px;overflow:auto;white-space:pre-wrap}
+  .hidden{display:none!important}
+  @media(max-width:760px){
+    .head-grid{grid-template-columns:repeat(2,1fr)}
+    td.sym{display:none} thead th.sym{display:none}
+    .recon-card{flex-wrap:wrap} .recon-card .cta{margin-left:0;width:100%}
+  }
+</style>
+
+<header class="top">
+  <div class="wrap">
+    <div class="brand">PDF → GPC <span class="tag">.pdf ➜ .gpc</span></div>
+    <div class="spacer"></div>
+    <a class="navlink" href="/index.html">Prohlížeč GPC →</a>
+    <button class="btn primary" id="btnOpen">Vybrat PDF</button>
+    <input type="file" id="file" accept="application/pdf,.pdf">
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="pipe">
+    <span class="node" id="n1">1 · PDF výpis</span><span class="arr">→</span>
+    <span class="node" id="n2">2 · kontrola součtů</span><span class="arr">→</span>
+    <span class="node" id="n3">3 · GPC ke stažení</span>
+  </div>
+
+  <div id="drop" class="drop">
+    <h1>Nahraj PDF výpis z Raiffeisenbank</h1>
+    <p>Převod proběhne celý ve tvém prohlížeči — PDF se nikam neposílá. Ze souboru se přečte hlavička
+       i pohyby, ověří se, že příjmy a výdaje sedí na konečný zůstatek, a vznikne GPC (věty 074/075,
+       128 znaků, kódování Windows-1250) připravený k importu.</p>
+    <div class="actions">
+      <button class="btn primary" id="btnOpen2">Vybrat PDF soubor</button>
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div id="errbox" class="err hidden"></div>
+  <div id="result" class="result hidden"></div>
+  <details class="debug hidden" id="debugBox">
+    <summary>Rozpoznaný text z PDF (pro ladění)</summary>
+    <pre id="debugPre"></pre>
+  </details>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+}
+const $ = (id)=>document.getElementById(id);
+const show=(el,on)=>el.classList.toggle('hidden',!on);
+function stage(n){ [1,2,3].forEach(i=>{const el=$('n'+i);el.classList.toggle('done',i<n);el.classList.toggle('on',i===n);}); }
+
+/* ---------- CP1250 encoder (built from the browser's own decode table) ---------- */
+const CP1250 = (()=>{ const d=new TextDecoder('windows-1250'),m={};
+  for(let b=0;b<256;b++) m[d.decode(new Uint8Array([b]))]=b; return m; })();
+function toCp1250Bytes(str){
+  const out=new Uint8Array(str.length);
+  for(let i=0;i<str.length;i++) out[i]=CP1250[str[i]] ?? 0x3F; // '?' for anything unmapped
+  return out;
+}
+/* strip diacritics for the 20-char name field (matches the Pohoda-verified sample) */
+function deacc(s){ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+
+/* ---------- helpers ---------- */
+const pad=(s,w)=>String(s).slice(0,w).padEnd(w,' ');
+const zero=(n,w)=>String(Math.round(Math.abs(Number(n)||0))).padStart(w,'0').slice(-w);
+function parseCzNum(s){ // "-25 489.20" / "1 471,01" -> number
+  if(!s) return NaN;
+  const neg=/-/.test(s); const t=s.replace(/[^\d.,]/g,'').replace(/\s/g,'').replace(',', '.');
+  const v=parseFloat(t); return isNaN(v)?NaN:(neg?-v:v);
+}
+function ddmmrr(d){ // {d,m,y} -> DDMMRR
+  return String(d.d).padStart(2,'0')+String(d.m).padStart(2,'0')+String(d.y%100).padStart(2,'0');
+}
+function acc16(protiucet){ // "4040400015/7910" -> 16 digits (no bank code)
+  if(!protiucet) return '0'.repeat(16);
+  const base=protiucet.split('/')[0].replace(/\D/g,''); return zero(base,16);
+}
+
+/* ---------- PDF text extraction: reconstruct visual rows via item positions ---------- */
+async function extractRows(buf){
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const pages=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const tc=await page.getTextContent();
+    const items=tc.items.filter(it=>it.str && it.str.trim().length)
+      .map(it=>({x:it.transform[4], y:it.transform[5], s:it.str}));
+    // group by y (rows), tolerance 3px
+    items.sort((a,b)=> b.y-a.y || a.x-b.x);
+    const rows=[]; let cur=null;
+    for(const it of items){
+      if(!cur || Math.abs(cur.y-it.y)>3){ cur={y:it.y, toks:[]}; rows.push(cur); }
+      cur.toks.push(it);
+    }
+    rows.forEach(r=>r.toks.sort((a,b)=>a.x-b.x));
+    pages.push(rows);
+  }
+  return pages;
+}
+
+/* ---------- parse the Raiffeisenbank statement ---------- */
+function parseStatement(pages){
+  const allLines=[];
+  pages.forEach((rows,pi)=>{ rows.forEach(r=>allLines.push({page:pi+1,y:r.y,text:r.toks.map(t=>t.s).join(' ').replace(/\s+/g,' ').trim(),toks:r.toks})); });
+  const flat=allLines.map(l=>l.text);
+  const joined=flat.join('\n');
+
+  // --- header ---
+  const H={};
+  const mAcc=joined.match(/Číslo účtu:\s*([\d-]+)\/(\d+)/);
+  if(mAcc){ H.account=mAcc[1]; H.bankCode=mAcc[2]; }
+  const mName=joined.match(/Název účtu:\s*(.+)/); H.name=mName?mName[1].trim():'';
+  const mStmt=joined.match(/Pořadové č\.?\s*výpisu:\s*(\d+)\s*za období:\s*(\d+)\.\s*(\d+)\.\s*(\d+)\s*-\s*(\d+)\.\s*(\d+)\.\s*(\d+)/);
+  if(mStmt){
+    H.stmtNo=+mStmt[1];
+    H.from={d:+mStmt[2],m:+mStmt[3],y:+mStmt[4]};
+    H.to={d:+mStmt[5],m:+mStmt[6],y:+mStmt[7]};
+  }
+  const grab=(re)=>{const m=joined.match(re);return m?parseCzNum(m[1]):NaN;};
+  H.opening=grab(/Počáteční zůstatek:\s*(-?[\d\s]+[.,]\d{2})/);
+  H.closing=grab(/Konečný zůstatek:\s*(-?[\d\s]+[.,]\d{2})/);
+  H.income =grab(/Příjmy celkem:\s*(-?[\d\s]+[.,]\d{2})/);
+  H.expense=grab(/Výdaje celkem:\s*(-?[\d\s]+[.,]\d{2})/);
+
+  // --- transactions: anchor on the transaction code (9-10 digit standalone token) ---
+  // Column x-thresholds derived from the header row of the movements table.
+  let cols=null;
+  for(const l of allLines){
+    if(/Kategorie transakce/.test(l.text) && /Typ transakce/.test(l.text)){
+      const find=(re)=>{const t=l.toks.find(t=>re.test(t.s));return t?t.x:null;};
+      cols={ kat:find(/Kategorie/), typ:find(/Typ/), vs:find(/^VS$/), pop:find(/Poplatek/), cast:find(/Částka/) };
+      break;
+    }
+  }
+  const c = cols || {kat:150,typ:325,vs:560,pop:670,cast:800};
+  const colOf=(x)=>{
+    if(x < (c.kat-20)) return 'datum';
+    if(x < (c.typ-20)) return 'kat';
+    if(x < (c.vs-20))  return 'typ';
+    if(x < (c.pop-20)) return 'vs';
+    if(x < (c.cast-40))return 'pop';
+    return 'cast';
+  };
+
+  // keep only rows inside the movements area (drop page headers/footers)
+  const dataRows=allLines.filter(l=>{
+    if(/^Strana\s/.test(l.text)||/Raiffeisenbank a\.s\./.test(l.text)) return false;
+    if(/Datum\s+Kategorie/.test(l.text)||/Valuta\s+Číslo/.test(l.text)||/Kód transakce/.test(l.text)) return false;
+    return true;
+  });
+
+  // build per-row column cells
+  const rowCells=dataRows.map(l=>{
+    const cell={datum:[],kat:[],typ:[],vs:[],pop:[],cast:[]};
+    l.toks.forEach(t=>cell[colOf(t.x)].push(t.s));
+    Object.keys(cell).forEach(k=>cell[k]=cell[k].join(' ').trim());
+    return cell;
+  });
+
+  // a transaction begins where the 'datum' column has a date and 'cast' column has a CZK amount
+  const isDate=(s)=>/^\d{1,2}\.\s*\d{1,2}\.\s*\d{4}$/.test(s.replace(/\s+/g,' ').trim());
+  const amountRe=/(-?\s?[\d\s]+[.,]\d{2})\s*CZK/;
+  const tx=[]; let block=null;
+  const push=()=>{ if(block) tx.push(block); };
+  for(const cell of rowCells){
+    const startsTx = isDate(cell.datum) && amountRe.test(cell.cast);
+    if(startsTx){ push(); block={datum:[],kat:[],typ:[],vs:[],cast:[]}; }
+    if(!block) continue;
+    ['datum','kat','typ','vs','cast'].forEach(k=>{ if(cell[k]) block[k].push(cell[k]); });
+  }
+  push();
+
+  const parseDate=(s)=>{const m=s.match(/(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})/);return m?{d:+m[1],m:+m[2],y:+m[3]}:null;};
+  const items=tx.map(b=>{
+    const datum=b.datum.join(' '); const kat=b.kat.join(' \n '); const typ=b.typ.join(' \n ');
+    const vsCol=b.vs.join(' '); const castCol=b.cast.join(' ');
+    const dates=(datum.match(/\d{1,2}\.\s*\d{1,2}\.\s*\d{4}/g)||[]).map(parseDate);
+    const kod=(datum.match(/\b\d{9,10}\b/)||[])[0]||'';
+    const amt=(()=>{const m=castCol.match(amountRe);return m?parseCzNum(m[1]):NaN;})();
+    const vs=(vsCol.match(/\b\d{6,10}\b/)||[])[0]
+           || (typ.match(/VS:\s*(\d+)/)||[])[1] || '';
+    const ks=(vsCol.match(/\b\d{3,4}\b/)||[])[0]
+           || (typ.match(/KS:\s*(\d+)/)||[])[1] || '';
+    const ss=(typ.match(/SS:\s*(\d+)/)||[])[1] || '';
+    // counter account + party
+    const proti=(kat.match(/([\d-]+\/\d{4})/)||[])[1]||'';
+    const katName=kat.replace(/Platba kartou|Platba|Konverze|Poplatek|Úrok|Trvalá platba/g,'')
+                     .replace(/[\d-]+\/\d{4}/,'').replace(/\n/g,' ').replace(/\s+/g,' ').trim();
+    const isCard=/kartou/i.test(kat)||ks==='1178';
+    let party;
+    if(isCard){
+      // merchant sits in the note line of the Typ column, before the first ';'
+      const note=typ.split('\n').map(s=>s.trim()).filter(Boolean).pop()||'';
+      party=note.replace(/PK:.*?\d{4}/,'').split(';')[0].replace(/\s+/g,' ').trim()||katName;
+    } else if(/Konverze/.test(kat)){
+      party='RB smenarna';
+    } else if(/Poplatek|Úrok/.test(kat)){
+      party=(typ.split('\n')[0]||'').trim();
+    } else {
+      party=katName||(typ.split('\n')[0]||'').trim();
+    }
+    return {
+      book:dates[0]||null, valuta:dates[1]||dates[0]||null, kod, proti,
+      party:deacc(party), vs, ks, ss, amount:amt
+    };
+  }).filter(t=>t.kod && !isNaN(t.amount));
+
+  return {H, items, debug:flat.join('\n')};
+}
+
+/* ---------- reconcile ---------- */
+function reconcile(H,items){
+  const round=x=>Math.round(x*100)/100;
+  const inc=round(items.filter(t=>t.amount>0).reduce((a,t)=>a+t.amount,0));
+  const exp=round(items.filter(t=>t.amount<0).reduce((a,t)=>a-t.amount,0));
+  const okInc = !isNaN(H.income)  && round(H.income)===inc;
+  const okExp = !isNaN(H.expense) && round(H.expense)===exp;
+  const okBal = !isNaN(H.opening)&&!isNaN(H.closing) && round(H.opening+inc-exp)===round(H.closing);
+  return {inc,exp,okInc,okExp,okBal,ok:okInc&&okExp&&okBal};
+}
+
+/* ---------- build GPC ---------- */
+function buildGpc(H,items){
+  const acc=zero((H.account||'').replace(/\D/g,''),16);
+  const hal=(v)=>zero(Math.round(Math.abs(v)*100),14);
+  const line074=()=>{
+    let f='074'+acc+pad(deacc(H.name||''),20)+ddmmrr(H.from);
+    f+=hal(H.opening)+(H.opening<0?'-':'+');
+    f+=hal(H.closing)+(H.closing<0?'-':'+');
+    f+=zero(Math.round((H.expense||0)*100),14)+'0';
+    f+=zero(Math.round((H.income||0)*100),14)+'0';
+    f+=String(H.stmtNo||0).padStart(3,'0');
+    f+=ddmmrr(H.to)+pad('RAIFFEISENBANK',14);
+    return f.slice(0,128).padEnd(128,' ');
+  };
+  const line075=(t)=>{
+    let f='075'+acc+acc16(t.proti)+zero((t.kod||'').replace(/\D/g,''),13);
+    f+=zero(Math.round(Math.abs(t.amount)*100),12);
+    f+=(t.amount<0?'1':'2');
+    f+=zero(t.vs||0,10)+zero(t.ks||0,10)+zero(t.ss||0,10);
+    f+=ddmmrr(t.valuta||t.book)+pad(t.party||'',20)+'00203'+ddmmrr(t.book||t.valuta);
+    return f.slice(0,128).padEnd(128,' ');
+  };
+  const lines=[line074(),...items.map(line075)];
+  return lines.join('\n')+'\n';
+}
+
+/* ---------- render ---------- */
+const fmt=(n)=>Number(n).toLocaleString('cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2});
+let LAST=null;
+
+function render(H,items,rc,gpcText,fname){
+  stage(3);
+  const box=$('result'); show(box,true);
+  const badge=rc.ok
+    ? `<div class="big">✓ Sedí</div><div class="detail">Příjmy i výdaje odpovídají hlavičce a navazují na konečný zůstatek.</div>`
+    : `<div class="big">✕ Nesouhlasí</div><div class="detail">
+        příjmy ${rc.okInc?'✓':'✕'} (${fmt(rc.inc)} / ${fmt(H.income)}) ·
+        výdaje ${rc.okExp?'✓':'✕'} (${fmt(rc.exp)} / ${fmt(H.expense)}) ·
+        zůstatek ${rc.okBal?'✓':'✕'}<br>Zkontroluj rozpoznaný text níže — něco se nenačetlo úplně.</div>`;
+  const rows=items.map(t=>{
+    const dd=(d)=>d?`${String(d.d).padStart(2,'0')}.${String(d.m).padStart(2,'0')}.${d.y}`:'—';
+    return `<tr>
+      <td class="date">${dd(t.book)}</td>
+      <td class="party">${t.party||'—'}</td>
+      <td class="sym">${(''+t.vs).replace(/^0+(?=\d)/,'')||'—'}</td>
+      <td class="sym">${(''+t.ks).replace(/^0+(?=\d)/,'')||'—'}</td>
+      <td class="sym">${t.proti||'—'}</td>
+      <td class="amount ${t.amount>=0?'pos':'neg'}">${t.amount>=0?'+':'−'}${fmt(Math.abs(t.amount))}</td>
+    </tr>`;}).join('');
+
+  box.innerHTML=`
+    <div class="recon-card ${rc.ok?'ok':'bad'}">
+      <div>${badge}</div>
+      <div class="cta">
+        <button class="btn ok" id="dl">Stáhnout ${fname}</button>
+      </div>
+    </div>
+    <div class="head-meta">účet <b>${H.account||'?'}/${H.bankCode||'?'}</b> · ${H.name||''} ·
+      výpis č. <b>${H.stmtNo??'?'}</b> · období <b>${H.from?`${H.from.d}.${H.from.m}.${H.from.y}`:'?'} – ${H.to?`${H.to.d}.${H.to.m}.${H.to.y}`:'?'}</b>
+      · <b>${items.length}</b> pohybů</div>
+    <div class="head-grid">
+      <div class="cell"><div class="lbl">Počáteční zůstatek</div><div class="val">${fmt(H.opening)}</div></div>
+      <div class="cell"><div class="lbl">Konečný zůstatek</div><div class="val">${fmt(H.closing)}</div></div>
+      <div class="cell"><div class="lbl">Příjmy</div><div class="val kre">${fmt(H.income)}</div></div>
+      <div class="cell"><div class="lbl">Výdaje</div><div class="val deb">${fmt(H.expense)}</div></div>
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Datum</th><th>Protistrana</th><th class="sym">VS</th><th class="sym">KS</th>
+        <th class="sym">Protiúčet</th><th class="num">Částka</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+
+  $('dl').onclick=()=>{
+    const bytes=toCp1250Bytes(gpcText);
+    const blob=new Blob([bytes],{type:'text/plain'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fname; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  };
+}
+
+async function handle(file){
+  show($('errbox'),false); show($('result'),false); show($('debugBox'),false);
+  $('status').textContent='Čtu PDF…'; stage(1);
+  try{
+    const buf=await file.arrayBuffer();
+    const pages=await extractRows(buf);
+    $('status').textContent='Rozpoznávám pohyby…'; stage(2);
+    const {H,items,debug}=parseStatement(pages);
+    $('debugPre').textContent=debug; show($('debugBox'),true);
+    if(!items.length) throw new Error('Nenašel jsem žádné pohyby. Otevři „Rozpoznaný text" a pošli mi ho — doladím parser na tvůj výpis.');
+    const rc=reconcile(H,items);
+    const period=H.to?`${H.to.y}_${String(H.to.m).padStart(2,'0')}`:'vypis';
+    const fname=`Vypis_${(H.account||'ucet').replace(/\D/g,'')}_${period}.gpc`;
+    const gpcText=buildGpc(H,items);
+    LAST={gpcText,fname};
+    $('status').textContent='';
+    render(H,items,rc,gpcText,fname);
+  }catch(err){
+    stage(1); $('status').textContent='';
+    const e=$('errbox'); e.textContent='Chyba: '+(err.message||err); show(e,true);
+    if($('debugPre').textContent) show($('debugBox'),true);
+  }
+}
+
+/* wiring */
+$('file').onchange=e=>{ if(e.target.files[0]) handle(e.target.files[0]); };
+['btnOpen','btnOpen2'].forEach(id=>$(id).onclick=()=>$('file').click());
+const dz=$('drop');
+['dragenter','dragover'].forEach(ev=>document.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('hot');}));
+['dragleave','drop'].forEach(ev=>document.addEventListener(ev,e=>{e.preventDefault();if(ev!=='drop')dz.classList.remove('hot');}));
+document.addEventListener('drop',e=>{dz.classList.remove('hot');const f=e.dataTransfer.files[0];if(f&&/pdf$/i.test(f.name))handle(f);});
+</script>
