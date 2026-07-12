@@ -1,0 +1,13 @@
+{
+  "name": "abo-gpc-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline-first viewer for Czech ABO/GPC bank statements",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}
