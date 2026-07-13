@@ -289,48 +289,45 @@ function parseAirbank(lines, joined){
   H.income =g(new RegExp('Připsáno na účet:\\s*'+NUM));
   H.expense=g(new RegExp('Odepsáno z účtu:\\s*'+NUM));
 
-  const {x:c}=makeColumnizer(lines,
-    t=>/Detaily/.test(t)&&/Částka/.test(t)&&/Poplatky/.test(t),
-    {datum:/Zaúčtování/, typ:/^Typ$/, nazev:/Název/, detail:/Detaily/, cast:/Částka/, pop:/Poplatky/});
-  const C={datum:90,typ:150,nazev:285,detail:505,cast:820,pop:900, ...c};
-  const colOf=(x)=> x<(C.typ-15)?'datum': x<(C.nazev-15)?'typ': x<(C.detail-15)?'nazev': x<(C.cast-40)?'detail': x<(C.pop-40)?'cast':'pop';
+  // Air Bank rows come back from pdf.js as: line A = "<zaúčtování> <typ> <název/detail> <částka> <poplatek>",
+  // line B = "<provedení> <kód transakce> <účet/karta> <detail>", optional line C = cizí měna/zpráva.
+  // Parsing runs on the reconstructed text lines with regex anchors (robust against column geometry).
+  const NOISE=/^Pokračování na straně|^\d\/\d$|^\d{4}\/\d{2}\/\d{2}$|Air Bank a\.s\.|Společnost zapsaná|^Vklad na tomto účtu|^o systému pojištění|^Informační přehled|^Zaúčtování|^Provedení|Kód transakce|debetní karty/;
+  const raw=lines.map(l=>l.text);
+  const owner=(raw[0]||'').trim();
+  const rows=raw.filter(l=>l && !NOISE.test(l));
+  const TYP=/(Platba kartou|Příchozí úhrada|Odchozí úhrada|Jednorázová úhrada|Trvalý příkaz|Poplatek|Úrok)/;
+  const reA=/^(\d{1,2}\.\d{1,2}\.\d{4})\s+(.+?)\s+(-?\d[\d\s]*[.,]\d{2})\s+\d[\d\s]*[.,]\d{2}\s*$/;
+  const reB=/^(\d{1,2}\.\d{1,2}\.\d{4})\s+(\d{10,13})\b\s*(.*)$/;
 
-  const data=lines.filter(l=>!/^\d+\/\d+$/.test(l.text)&&!/Air Bank a\.s\./.test(l.text)
-    &&!/Pokračování na straně/.test(l.text)&&!/Zaúčtování|Provedení|Kód transakce|debetní karty/.test(l.text));
-  const cells=data.map(l=>{const o={datum:[],typ:[],nazev:[],detail:[],cast:[]};
-    l.toks.forEach(t=>{const k=colOf(t.x); if(o[k]) o[k].push(t.s);}); const r={};
-    for(const k in o) r[k]=o[k].join(' ').trim(); return r;});
-
-  const isDate=(s)=>/^\d{1,2}\.\s*\d{1,2}\.\s*\d{4}$/.test(s.replace(/\s+/g,' ').trim())
-                 || /^\d{2}\.\d{2}\.\d{4}$/.test(s.trim());
-  const amt=new RegExp(NUM);
-  const blocks=[]; let b=null;
-  for(const cell of cells){
-    const start = isDate(cell.datum) && amt.test(cell.cast);
-    if(start){ if(b)blocks.push(b); b={datum:[],typ:[],nazev:[],detail:[],cast:[]}; }
-    if(!b) continue; ['datum','typ','nazev','detail','cast'].forEach(k=>{if(cell[k])b[k].push(cell[k]);});
+  const blocks=[]; let cur=null;
+  for(const ln of rows){
+    const mA=ln.match(reA);
+    if(mA){ if(cur)blocks.push(cur); cur={aDate:mA[1], mid:mA[2], amount:parseCzNum(mA[3]), rest:[]}; continue; }
+    if(cur) cur.rest.push(ln);
   }
-  if(b)blocks.push(b);
+  if(cur)blocks.push(cur);
 
-  const items=blocks.map(bl=>{
-    const datum=bl.datum.join(' '), typ=bl.typ.join('\n'), nazev=bl.nazev.join('\n'),
-          detail=bl.detail.join('\n'), castCol=bl.cast.join(' ');
-    const dates=(datum.match(/\d{1,2}\.\s*\d{1,2}\.\s*\d{4}/g)||[]).map(parseDate);
-    const kod=(datum.match(/\b\d{10,13}\b/)||typ.match(/\b\d{10,13}\b/)||[])[0]||'';
-    const amount=(()=>{const m=castCol.match(amt);return m?parseCzNum(m[1]):NaN;})();
-    const vs=(detail.match(/VS[:\s]*(\d+)/)||[])[1]||'';
-    const ss=(detail.match(/SS[:\s]*(\d+)/)||[])[1]||'';
-    const typeName=(typ.split('\n')[0]||'').trim();
-    // account/card line inside nazev column
-    const acctLine=nazev.split('\n').find(s=>/\d{4,}/.test(s))||'';
-    const proti=(acctLine.match(/([\d-]+\s*\/\s*\d{4})/)||[])[1]||'';
-    const card=/kartou/i.test(typ)||/\*/.test(acctLine);
-    let party;
-    if(card){ party=(detail.split('\n')[0]||'').split(/,| UL\.| Via | Na Porici/)[0].replace(/\s+/g,' ').trim(); }
-    else { party=(nazev.split('\n')[0]||'').trim(); }
-    if(!party){ party=(detail.split('\n').find(s=>s&&!/^VS|^SS/.test(s))||typeName||'').trim(); }
-    return {book:dates[0]||null, valuta:dates[1]||dates[0]||null, kod, proti:proti.replace(/\s/g,''),
-            party:deacc(party), vs, ks:'', ss, amount};
+  const items=blocks.map(b=>{
+    const bLine=b.rest.find(l=>reB.test(l)); const mB=bLine?bLine.match(reB):null;
+    const kod=mB?mB[2]:''; const bRest=mB?mB[3]:'';
+    const full=[b.mid,...b.rest].join(' ');
+    const typ=(b.mid.match(TYP)||[])[0]||'';
+    const card=/kartou/i.test(b.mid)||/\*{2,}/.test(bRest);
+    const proti=(bRest.match(/([\d-]+)\s*\/\s*(\d{4})/)||[]).slice(1).join('/')||'';
+    const vs=(full.match(/VS\s*(\d+)/)||[])[1]||'';
+    const ss=(full.match(/SS\s*(\d+)/)||[])[1]||'';
+    let midRest=b.mid.replace(TYP,'').trim(); let party;
+    if(card){
+      midRest=midRest.replace(owner,'').trim();
+      party=midRest.split(/,| UL\.| Via | Na Porici/)[0].replace(/\s+/g,' ').trim();
+    } else {
+      party=midRest.split(/\s+VS\d|\s+VS\s/)[0].replace(/\s+/g,' ').trim();
+      if(!party){ const msg=(b.rest.find(l=>!reB.test(l)&&!/kurz/.test(l))||'').trim(); party=msg||typ; }
+    }
+    if(party.length>40) party=typ||party.slice(0,40);
+    return {book:parseDate(b.aDate), valuta:(mB?parseDate(mB[1]):null)||parseDate(b.aDate),
+            kod, proti, party:deacc(party), vs, ks:'', ss, amount:b.amount};
   }).filter(t=>t.kod && !isNaN(t.amount));
   return {H, items};
 }
