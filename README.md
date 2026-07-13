@@ -22,8 +22,10 @@ kdyby jiný výpis nesedl.
 abo-gpc-viewer/
 ├── public/
 │   ├── index.html    # prohlížeč GPC výpisů (funguje i sám o sobě)
-│   └── prevod.html   # převod PDF (Raiffeisenbank) → GPC, celý v prohlížeči
-├── server.js         # nulové závislosti, servíruje public/
+│   ├── prevod.html   # převod PDF (Raiffeisenbank / Air Bank) → GPC, v prohlížeči
+│   ├── parovani.html # párování pohybů z GPC s vydanými doklady (XML)
+│   └── faktury.html  # faktury Zásilkovny přes server-side proxy
+├── server.js         # nulové závislosti, servíruje public/ + Zásilkovna proxy
 ├── package.json      # npm start -> node server.js
 ├── railway.json      # start command + healthcheck /healthz
 └── .nvmrc            # Node 18
@@ -31,6 +33,21 @@ abo-gpc-viewer/
 
 Endpoint `POST /api/convert` je zatím záměrně stub (`501`) — místo pro budoucí
 převod PDF → GPC.
+
+### Faktury Zásilkovny (server-side proxy)
+
+Stránka `faktury.html` čte faktury přes backend, aby se API klíč a heslo nikdy
+nedostaly do prohlížeče. Nastav v Railway → Variables:
+
+```
+ZASILKOVNA_KEY       = API klíč   (Klientská sekce → Zákaznická podpora)
+ZASILKOVNA_PASSWORD  = API heslo
+APP_TOKEN            = (volitelné) tajný řetězec; když je nastavený,
+                       /api/zasilkovna/* vyžaduje hlavičku x-app-token
+```
+
+Proxy endpointy (klíč/heslo se doplní na serveru, nikdy se nevrací ani neloguje):
+`/api/zasilkovna/status`, `/invoices`, `/packet`, `/packet-pohoda`, `/pdf`.
 
 ## Spuštění lokálně
 
