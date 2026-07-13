@@ -1,0 +1,269 @@
+<!-- Párování pohybů na účtu s vydanými doklady — client-side, offline. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Párování plateb · GPC ↔ doklady</title>
+<style>
+  :root{
+    --paper:#FBFBFD; --panel:#FFFFFF; --ink:#171B26; --ink-2:#3A4152;
+    --muted:#7A8296; --line:#E6E8EF; --line-2:#EFF1F6;
+    --accent:#3B3F8F; --kredit:#0F7A52; --kredit-bg:#EAF6F0;
+    --debet:#B03A2E; --debet-bg:#FBEDEA; --warn:#B0642E; --warn-bg:#FBF3E8;
+    --mono:"JetBrains Mono","SF Mono",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+    --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.45;
+       -webkit-font-smoothing:antialiased;padding:0 0 72px}
+  .wrap{max-width:1280px;margin:0 auto;padding:0 20px}
+  header.top{border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:20}
+  .top .wrap{display:flex;align-items:center;gap:14px;height:60px}
+  .brand{display:flex;align-items:baseline;gap:10px;font-weight:700;letter-spacing:-.02em;font-size:16px}
+  .brand .tag{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--accent);
+       border:1px solid var(--accent);border-radius:5px;padding:1px 6px;letter-spacing:.04em}
+  .top .spacer{flex:1}
+  .navlink{font-weight:600;font-size:13px;color:var(--ink-2);text-decoration:none;padding:8px 10px;border-radius:8px}
+  .navlink:hover{background:var(--line-2);color:var(--ink)}
+  .btn{font:inherit;font-weight:600;font-size:13px;border:1px solid var(--line);background:var(--panel);
+       color:var(--ink);padding:8px 14px;border-radius:8px;cursor:pointer;transition:.12s}
+  .btn:hover{border-color:var(--ink-2)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  input[type=file]{display:none}
+
+  /* two upload slots */
+  .slots{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:26px 0 8px}
+  .slot{border:1.5px dashed var(--line);border-radius:14px;background:var(--panel);padding:24px;transition:.15s;cursor:pointer}
+  .slot.hot{border-color:var(--accent);background:#F5F5FD}
+  .slot.done{border-style:solid;border-color:var(--kredit);background:var(--kredit-bg)}
+  .slot h3{margin:0 0 4px;font-size:15px}
+  .slot p{margin:0;color:var(--muted);font-size:12.5px}
+  .slot .fn{font-family:var(--mono);font-size:12px;color:var(--kredit);font-weight:600;margin-top:8px;word-break:break-all}
+  .slot .num{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);margin-top:2px}
+
+  .err{margin:14px 0;padding:12px 15px;border:1px solid var(--debet);background:var(--debet-bg);color:var(--debet);border-radius:10px;font-size:13px}
+
+  .bar{display:flex;gap:18px;align-items:center;margin:18px 0 12px;flex-wrap:wrap;font-family:var(--mono);font-size:12.5px}
+  .bar .stat{display:flex;align-items:center;gap:7px}
+  .dot{width:10px;height:10px;border-radius:3px;display:inline-block}
+  .dot.m{background:var(--kredit)} .dot.w{background:var(--warn)} .dot.u{background:var(--line)}
+  .bar b{color:var(--ink)}
+  .bar .filter{margin-left:auto;display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .bar .filter button{font:inherit;font-size:12.5px;font-weight:600;border:0;background:var(--panel);color:var(--ink-2);
+       padding:7px 12px;cursor:pointer;border-right:1px solid var(--line-2)}
+  .bar .filter button:last-child{border-right:0}
+  .bar .filter button[aria-pressed=true]{background:var(--ink);color:#fff}
+
+  .tablewrap{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel)}
+  table{width:100%;border-collapse:collapse}
+  thead th{position:sticky;top:60px;background:var(--panel);text-align:left;font-size:11px;text-transform:uppercase;
+       letter-spacing:.06em;color:var(--muted);font-weight:700;padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+  thead th.num{text-align:right}
+  tbody tr{border-bottom:1px solid var(--line-2)}
+  tbody tr.matched{background:var(--kredit-bg)}
+  tbody tr.warn{background:var(--warn-bg)}
+  td{padding:8px 12px;vertical-align:middle}
+  td.date{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--ink-2);white-space:nowrap;font-size:13px}
+  td.vs{font-family:var(--mono);font-size:12.5px;color:var(--ink-2);white-space:nowrap}
+  td.party{font-weight:600;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  td.amount{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
+  td.amount.pos{color:var(--kredit)} td.amount.neg{color:var(--debet)}
+  td.doc{font-size:12.5px;color:var(--ink-2);max-width:230px}
+  td.doc .no{font-family:var(--mono);font-weight:600;color:var(--ink)}
+  td.doc .warnmark{color:var(--warn);font-weight:700}
+  .expl input{width:100%;font:inherit;font-size:13px;padding:6px 9px;border:1px solid var(--line);border-radius:7px;background:var(--panel)}
+  .expl input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:var(--accent)}
+  tr.matched .expl input{border-color:#BFE3D2}
+  .pill{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px}
+  .pill.m{background:#D9EFE4;color:var(--kredit)} .pill.w{background:#F5E3CC;color:var(--warn)} .pill.u{background:var(--line-2);color:var(--muted)}
+  .hidden{display:none!important}
+  .hint{color:var(--muted);font-size:12.5px;margin:16px 0}
+  @media(max-width:820px){ .slots{grid-template-columns:1fr} td.party{max-width:110px} }
+</style>
+
+<header class="top">
+  <div class="wrap">
+    <div class="brand">Párování <span class="tag">GPC ↔ doklady</span></div>
+    <div class="spacer"></div>
+    <a class="navlink" href="/index.html">Prohlížeč</a>
+    <a class="navlink" href="/prevod.html">PDF → GPC</a>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="slots">
+    <div class="slot" id="slotGpc">
+      <h3>1 · Pohyby na účtu (.gpc)</h3>
+      <p>Výpis ve formátu GPC — přetáhni sem nebo klikni.</p>
+      <div class="fn" id="gpcFn"></div><div class="num" id="gpcNum"></div>
+      <input type="file" id="fileGpc" accept=".gpc,.txt,.abo">
+    </div>
+    <div class="slot" id="slotXml">
+      <h3>2 · Vydané doklady (.xml)</h3>
+      <p>Export ze Shoptetu ve formátu pro Pohodu.</p>
+      <div class="fn" id="xmlFn"></div><div class="num" id="xmlNum"></div>
+      <input type="file" id="fileXml" accept=".xml,text/xml,application/xml">
+    </div>
+  </div>
+
+  <div id="errbox" class="err hidden"></div>
+  <div id="hint" class="hint">Nahraj oba soubory. Pohyby se spárují s doklady podle variabilního symbolu (VS = symVar dokladu). Spárované řádky se obarví a do „Vysvětlení" se doplní <b>Platba od zákazníka</b>.</div>
+
+  <div id="app" class="hidden">
+    <div class="bar">
+      <span class="stat"><span class="dot m"></span> spárováno <b id="cMatch">0</b></span>
+      <span class="stat"><span class="dot w"></span> VS sedí, částka ne <b id="cWarn">0</b></span>
+      <span class="stat"><span class="dot u"></span> nespárováno <b id="cUnmatch">0</b></span>
+      <span class="stat">doklady spárováno <b id="cDocs">0</b>/<b id="cDocsAll">0</b></span>
+      <span class="filter" id="filter">
+        <button data-f="all" aria-pressed="true">Vše</button>
+        <button data-f="in">Jen příjmy</button>
+        <button data-f="unmatched">Nespárované</button>
+      </span>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Datum</th><th>VS</th><th>Protistrana</th><th class="num">Částka</th>
+          <th>Spárovaný doklad</th><th style="min-width:220px">Vysvětlení</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const $=(id)=>document.getElementById(id);
+const show=(el,on)=>el.classList.toggle('hidden',!on);
+const fmt=(n)=>Number(n).toLocaleString('cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2});
+const stripLead=(s)=>{const t=String(s).replace(/^0+/,'');return t===''?'':t;};
+function dispDate(ddmmrr){ if(!/^\d{6}$/.test(ddmmrr))return ddmmrr||''; return ddmmrr.slice(0,2)+'.'+ddmmrr.slice(2,4)+'.20'+ddmmrr.slice(4,6); }
+
+/* ---------- GPC (pohyby) ---------- */
+function parseGpc(bytes){
+  const text=new TextDecoder('windows-1250').decode(bytes);
+  const lines=text.split(/\r\n|\r|\n/).filter(l=>l.length>=100);
+  const mov=lines.filter(l=>l.slice(0,3)==='075').map((r,i)=>({
+    i, amount:(parseInt(r.slice(48,60),10)||0)/100*(r[60]==='2'?1:-1),
+    vs:stripLead(r.slice(61,71)), ks:stripLead(r.slice(71,81)), ss:stripLead(r.slice(81,91)),
+    party:r.slice(97,117).trim(), valuta:r.slice(91,97), book:r.slice(122,128),
+    vysvetleni:'', edited:false
+  }));
+  if(!mov.length) throw new Error('V GPC souboru nejsou žádné pohyby (věty 075).');
+  return mov;
+}
+
+/* ---------- XML (vydané doklady, formát Pohoda/StormWare) ---------- */
+function byLocal(root, local){ return [...root.getElementsByTagName('*')].filter(n=>n.localName===local); }
+function num(el){ return el?parseFloat((el.textContent||'').replace(',','.'))||0:0; }
+function parseInvoices(text){
+  const doc=new DOMParser().parseFromString(text,'application/xml');
+  if(doc.querySelector('parsererror')) throw new Error('XML se nepodařilo načíst (chyba parseru).');
+  const invEls=byLocal(doc,'invoice');
+  if(!invEls.length) throw new Error('V XML nejsou žádné faktury (inv:invoice).');
+  const list=invEls.map(el=>{
+    const symVar=(byLocal(el,'symVar')[0]?.textContent||'').trim();
+    const number=(byLocal(el,'numberRequested')[0]?.textContent||'').trim();
+    const name=(byLocal(el,'name')[0]?.textContent||'').trim();
+    let gross=0;
+    for(const it of byLocal(el,'invoiceItem')){
+      gross+=num(byLocal(it,'price')[0])+num(byLocal(it,'priceVAT')[0]);
+    }
+    gross+=num(byLocal(el,'priceRound')[0]);
+    return {symVar, number, name, gross:Math.round(gross*100)/100};
+  });
+  const bySym={};
+  list.forEach(inv=>{ if(inv.symVar) bySym[inv.symVar]=inv; });
+  return {list, bySym};
+}
+
+/* ---------- state ---------- */
+let MOV=null, INV=null, filter='all';
+
+function matchAll(){
+  if(!MOV) return;
+  let docsMatched=new Set();
+  MOV.forEach(m=>{
+    m.match=null; m.state='u';
+    if(INV && m.amount>0 && m.vs && INV.bySym[m.vs]){
+      const inv=INV.bySym[m.vs];
+      m.match=inv;
+      const amtOk=Math.abs(inv.gross-m.amount)<0.01;
+      m.state=amtOk?'m':'w';
+      docsMatched.add(inv.symVar);
+      if(!m.edited) m.vysvetleni='Platba od zákazníka';
+    }
+  });
+  return docsMatched.size;
+}
+
+function render(){
+  const docsMatched=matchAll();
+  show($('hint'), !(MOV&&INV));
+  show($('app'), !!MOV);
+  const body=$('tbody'); body.innerHTML='';
+  let cM=0,cW=0,cU=0;
+  MOV.forEach(m=>{
+    if(m.state==='m')cM++; else if(m.state==='w')cW++; else cU++;
+    if(filter==='in'&&m.amount<=0) return;
+    if(filter==='unmatched'&&m.state==='m') return;
+    const tr=document.createElement('tr');
+    tr.className = m.state==='m'?'matched':m.state==='w'?'warn':'';
+    const docCell = m.match
+      ? '<span class="no">č. '+(m.match.number||'?')+'</span> · '+(m.match.name||'—')+' · '+fmt(m.match.gross)+
+        (m.state==='w'?' <span class="warnmark">≠ částka</span>':'')
+      : '—';
+    const pill = m.state==='m'?'<span class="pill m">spárováno</span>'
+               : m.state==='w'?'<span class="pill w">VS ✓ / částka ✕</span>'
+               : (m.amount>0?'<span class="pill u">nespárováno</span>':'');
+    tr.innerHTML=
+      '<td class="date">'+dispDate(m.book)+'</td>'+
+      '<td class="vs">'+(m.vs||'—')+'</td>'+
+      '<td class="party" title="'+m.party+'">'+(m.party||'—')+'</td>'+
+      '<td class="amount '+(m.amount>=0?'pos':'neg')+'">'+(m.amount>=0?'+':'−')+fmt(Math.abs(m.amount))+'</td>'+
+      '<td class="doc">'+docCell+'<div style="margin-top:3px">'+pill+'</div></td>'+
+      '<td class="expl"><input value="'+(m.vysvetleni||'').replace(/"/g,'&quot;')+'" placeholder="Vysvětlení…"></td>';
+    const inp=tr.querySelector('input');
+    inp.addEventListener('input',()=>{ m.vysvetleni=inp.value; m.edited=true; });
+    body.appendChild(tr);
+  });
+  $('cMatch').textContent=cM; $('cWarn').textContent=cW; $('cUnmatch').textContent=cU;
+  $('cDocs').textContent=docsMatched||0; $('cDocsAll').textContent=INV?INV.list.length:0;
+}
+
+/* ---------- file loading ---------- */
+function fail(msg){ const e=$('errbox'); e.textContent='Chyba: '+msg; show(e,true); }
+function readGpc(file){
+  const rd=new FileReader();
+  rd.onload=e=>{ try{ MOV=parseGpc(new Uint8Array(e.target.result)); show($('errbox'),false);
+      $('slotGpc').classList.add('done'); $('gpcFn').textContent=file.name;
+      $('gpcNum').textContent=MOV.length+' pohybů'; render();
+    }catch(err){ fail(err.message); } };
+  rd.readAsArrayBuffer(file);
+}
+function readXml(file){
+  const rd=new FileReader();
+  rd.onload=e=>{ try{ INV=parseInvoices(e.target.result); show($('errbox'),false);
+      $('slotXml').classList.add('done'); $('xmlFn').textContent=file.name;
+      $('xmlNum').textContent=INV.list.length+' dokladů'; if(MOV) render();
+    }catch(err){ fail(err.message); } };
+  rd.readAsText(file,'utf-8');
+}
+
+$('fileGpc').onchange=e=>{ if(e.target.files[0]) readGpc(e.target.files[0]); };
+$('fileXml').onchange=e=>{ if(e.target.files[0]) readXml(e.target.files[0]); };
+$('slotGpc').onclick=e=>{ if(e.target.tagName!=='INPUT') $('fileGpc').click(); };
+$('slotXml').onclick=e=>{ if(e.target.tagName!=='INPUT') $('fileXml').click(); };
+
+function dnd(slot, handler){
+  ['dragenter','dragover'].forEach(ev=>slot.addEventListener(ev,e=>{e.preventDefault();slot.classList.add('hot');}));
+  ['dragleave','drop'].forEach(ev=>slot.addEventListener(ev,e=>{e.preventDefault();if(ev!=='drop')slot.classList.remove('hot');}));
+  slot.addEventListener('drop',e=>{e.preventDefault();slot.classList.remove('hot');const f=e.dataTransfer.files[0];if(f)handler(f);});
+}
+dnd($('slotGpc'),readGpc); dnd($('slotXml'),readXml);
+
+$('filter').querySelectorAll('button').forEach(b=>b.onclick=()=>{
+  filter=b.dataset.f;
+  $('filter').querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',x===b));
+  render();
+});
+</script>
