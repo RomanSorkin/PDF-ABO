@@ -1,0 +1,280 @@
+<!-- Faktury Zásilkovny — čte přes server-side proxy (/api/zasilkovna/*). Klíč/heslo zůstávají na serveru. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Faktury Zásilkovny</title>
+<style>
+  :root{
+    --paper:#FBFBFD; --panel:#FFFFFF; --ink:#171B26; --ink-2:#3A4152;
+    --muted:#7A8296; --line:#E6E8EF; --line-2:#EFF1F6;
+    --accent:#3B3F8F; --kredit:#0F7A52; --kredit-bg:#EAF6F0;
+    --debet:#B03A2E; --debet-bg:#FBEDEA; --warn:#B0642E; --warn-bg:#FBF3E8;
+    --mono:"JetBrains Mono","SF Mono",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+    --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.45;
+       -webkit-font-smoothing:antialiased;padding:0 0 72px}
+  .wrap{max-width:1280px;margin:0 auto;padding:0 20px}
+  header.top{border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:20}
+  .top .wrap{display:flex;align-items:center;gap:14px;height:60px}
+  .brand{display:flex;align-items:baseline;gap:10px;font-weight:700;letter-spacing:-.02em;font-size:16px}
+  .brand .tag{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--accent);
+       border:1px solid var(--accent);border-radius:5px;padding:1px 6px;letter-spacing:.04em}
+  .top .spacer{flex:1}
+  .navlink{font-weight:600;font-size:13px;color:var(--ink-2);text-decoration:none;padding:8px 10px;border-radius:8px}
+  .navlink:hover{background:var(--line-2);color:var(--ink)}
+  .btn{font:inherit;font-weight:600;font-size:13px;border:1px solid var(--line);background:var(--panel);
+       color:var(--ink);padding:8px 13px;border-radius:8px;cursor:pointer;transition:.12s;text-decoration:none;display:inline-block}
+  .btn:hover{border-color:var(--ink-2)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.sm{padding:4px 9px;font-size:12px}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  input,select{font:inherit;font-size:14px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+  input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:var(--accent)}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:24px 0}
+  .card h2{margin:0 0 6px;font-size:16px}
+  .card p{margin:0 0 4px;color:var(--muted);font-size:13px}
+  .setup{border-color:var(--warn);background:var(--warn-bg)}
+  .setup code{font-family:var(--mono);font-size:12.5px;background:#fff;border:1px solid var(--line);border-radius:5px;padding:1px 6px}
+  .setup ol{margin:10px 0 0;padding-left:20px} .setup li{margin:5px 0;font-size:13px}
+  .ok-badge{display:inline-block;font-family:var(--mono);font-size:11.5px;font-weight:700;color:var(--kredit);
+       background:var(--kredit-bg);border:1px solid #BFE3D2;border-radius:20px;padding:3px 10px}
+
+  .controls{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin:20px 0 14px}
+  .controls .fld{display:flex;flex-direction:column;gap:4px}
+  .controls label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+  .controls .spacer{flex:1}
+
+  .err{margin:14px 0;padding:12px 15px;border:1px solid var(--debet);background:var(--debet-bg);color:var(--debet);border-radius:10px;font-size:13px}
+
+  .tablewrap{border:1px solid var(--line);border-radius:10px;overflow:auto;background:var(--panel)}
+  table{width:100%;border-collapse:collapse;min-width:640px}
+  thead th{position:sticky;top:0;background:var(--panel);text-align:left;font-size:11px;text-transform:uppercase;
+       letter-spacing:.05em;color:var(--muted);font-weight:700;padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+  tbody tr{border-bottom:1px solid var(--line-2)}
+  tbody tr:hover{background:#FAFAFE}
+  td{padding:8px 12px;vertical-align:middle;font-size:13px;white-space:nowrap}
+  td.n{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  td.actions{display:flex;gap:6px}
+  tr.detail td{background:#F5F6FC;padding:0}
+  .detailbox{padding:12px 14px}
+  .detailbox .dh{font-family:var(--mono);font-size:12px;color:var(--ink-2);margin-bottom:8px}
+
+  details.debug{margin:16px 0 0;border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
+  details.debug summary{cursor:pointer;padding:11px 15px;font-weight:600;font-size:13px;color:var(--ink-2)}
+  details.debug pre{margin:0;padding:12px 15px;border-top:1px solid var(--line-2);background:#0F1420;color:#C6CBDB;
+       font-family:var(--mono);font-size:11.5px;line-height:1.6;max-height:300px;overflow:auto;white-space:pre-wrap}
+  .hidden{display:none!important}
+  .muted{color:var(--muted);font-size:12.5px}
+</style>
+
+<header class="top">
+  <div class="wrap">
+    <div class="brand">Faktury Zásilkovny <span class="tag">API</span></div>
+    <div class="spacer"></div>
+    <a class="navlink" href="/index.html">Prohlížeč</a>
+    <a class="navlink" href="/prevod.html">PDF → GPC</a>
+    <a class="navlink" href="/parovani.html">Párování</a>
+  </div>
+</header>
+
+<div class="wrap">
+  <!-- setup / stav -->
+  <div id="setup" class="card setup hidden">
+    <h2>Backend zatím nemá přístup k Zásilkovně</h2>
+    <p>Chybí přihlašovací údaje k API. Nastav je v Railway (nikam se nepromítnou do prohlížeče):</p>
+    <ol>
+      <li>Railway → tvůj projekt → <b>Variables</b></li>
+      <li>Přidej <code>ZASILKOVNA_KEY</code> = tvůj API klíč (Klientská sekce → Zákaznická podpora)</li>
+      <li>Přidej <code>ZASILKOVNA_PASSWORD</code> = tvé API heslo</li>
+      <li>Volitelně <code>APP_TOKEN</code> = libovolný tajný řetězec — tím zamkneš tyto endpointy, ať k tvým fakturám nemá přístup kdokoli s odkazem</li>
+      <li>Po uložení Railway službu restartuje; pak obnov tuto stránku</li>
+    </ol>
+    <p class="muted" style="margin-top:10px">Klíč ani heslo nikdy neposílej do prohlížeče — proto to čte server přes proxy.</p>
+  </div>
+
+  <div id="tokenCard" class="card hidden">
+    <h2>Přístupový token</h2>
+    <p>Endpointy jsou zamčené (<code>APP_TOKEN</code>). Zadej token, který jsi nastavil v Railway.</p>
+    <div style="display:flex;gap:10px;margin-top:10px">
+      <input id="tokenInput" type="password" placeholder="APP_TOKEN" style="flex:1">
+      <button class="btn primary" id="tokenBtn">Odemknout</button>
+    </div>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="controls">
+      <div class="fld"><label>Faktury od</label><input type="date" id="from"></div>
+      <div class="fld"><label>do</label><input type="date" id="to"></div>
+      <button class="btn primary" id="loadBtn">Načíst faktury</button>
+      <div class="spacer"></div>
+      <span id="statusBadge" class="ok-badge">připojeno</span>
+    </div>
+
+    <div id="errbox" class="err hidden"></div>
+    <div id="listWrap" class="tablewrap hidden">
+      <table>
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div id="empty" class="muted hidden" style="margin-top:14px">Za zvolené období nejsou žádné faktury (nebo je seznam prázdný).</div>
+
+    <details class="debug hidden" id="debugBox">
+      <summary>Surové CSV z Zásilkovny (pro ladění)</summary>
+      <pre id="debugPre"></pre>
+    </details>
+  </div>
+</div>
+
+<script>
+const $=(id)=>document.getElementById(id);
+const show=(el,on)=>el.classList.toggle('hidden',!on);
+let TOKEN='', TOKEN_REQUIRED=false;
+
+/* ---------- API helper (adds token header, never puts secrets in URL) ---------- */
+async function api(path, params){
+  const u=new URL(path, location.origin);
+  for(const k in params){ const v=params[k]; if(v!=null&&v!=='') u.searchParams.set(k,v); }
+  const headers={};
+  if(TOKEN) headers['x-app-token']=TOKEN;
+  return fetch(u, {headers});
+}
+function decodeBuf(buf){
+  let s=new TextDecoder('utf-8',{fatal:false}).decode(buf);
+  if(/\uFFFD/.test(s)) s=new TextDecoder('windows-1250').decode(buf);
+  return s;
+}
+function parseCsv(text){
+  text=text.replace(/\r\n?/g,'\n').replace(/\n+$/,'');
+  if(!text) return [];
+  const first=text.split('\n')[0];
+  const delim=[';','\t',','].map(d=>[d,first.split(d).length]).sort((a,b)=>b[1]-a[1])[0][0];
+  const rows=[]; let row=[],cur='',q=false;
+  for(let i=0;i<text.length;i++){ const c=text[i];
+    if(q){ if(c==='"'){ if(text[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=c; }
+    else if(c==='"') q=true;
+    else if(c===delim){ row.push(cur); cur=''; }
+    else if(c==='\n'){ row.push(cur); rows.push(row); row=[]; cur=''; }
+    else cur+=c;
+  }
+  row.push(cur); rows.push(row);
+  return rows.filter(r=>r.some(c=>c.trim()!==''));
+}
+// najdi sloupec, který v datech vypadá jako číslo faktury (dlouhé číslo)
+function findNumberCol(rows){
+  const start=rows.length>1?1:0;
+  const cols=rows[0].length; let best=-1,bestHits=0;
+  for(let c=0;c<cols;c++){
+    let hits=0;
+    for(let r=start;r<rows.length;r++){ if(/^\d{6,}$/.test((rows[r][c]||'').trim())) hits++; }
+    if(hits>bestHits){bestHits=hits;best=c;}
+  }
+  return bestHits>0?best:-1;
+}
+function looksLikeHeader(rows){
+  if(rows.length<2) return false;
+  return rows[0].some(c=>/[A-Za-zÁ-ž]/.test(c)) && !/^\d{6,}$/.test((rows[0].join('')).replace(/\D/g,'').slice(0,8));
+}
+
+/* ---------- render invoice list ---------- */
+async function loadInvoices(){
+  show($('errbox'),false); show($('empty'),false); show($('listWrap'),false);
+  $('loadBtn').disabled=true; $('loadBtn').textContent='Načítám…';
+  try{
+    const r=await api('/api/zasilkovna/invoices',{from:$('from').value, to:$('to').value, version:2, lang:'cs'});
+    if(r.status===401){ TOKEN=''; show($('tokenCard'),true); show($('app'),false); throw new Error('Neplatný token.'); }
+    if(r.status===503){ show($('setup'),true); show($('app'),false); throw new Error('Backend není nakonfigurovaný.'); }
+    const buf=await r.arrayBuffer(); const text=decodeBuf(buf);
+    $('debugPre').textContent=text; show($('debugBox'),true);
+    if(!r.ok) throw new Error('Zásilkovna vrátila stav '+r.status+'.');
+    const rows=parseCsv(text);
+    if(!rows.length){ show($('empty'),true); return; }
+    renderList(rows);
+  }catch(err){ const e=$('errbox'); e.textContent='Chyba: '+err.message; show(e,true); }
+  finally{ $('loadBtn').disabled=false; $('loadBtn').textContent='Načíst faktury'; }
+}
+
+function renderList(rows){
+  const header=looksLikeHeader(rows);
+  const headRow = header ? rows[0] : rows[0].map((_,i)=>'sl. '+(i+1));
+  const dataRows = header ? rows.slice(1) : rows;
+  const numCol=findNumberCol(rows);
+  $('thead').innerHTML='<tr>'+headRow.map(h=>'<th>'+esc(h)+'</th>').join('')+'<th>Akce</th></tr>';
+  $('tbody').innerHTML=dataRows.map((r,ri)=>{
+    const number=numCol>=0?(r[numCol]||'').trim():'';
+    const cells=r.map((c,ci)=>'<td class="'+(/^-?[\d\s.,]+$/.test(c)?'n':'')+'">'+esc(c)+'</td>').join('');
+    const act=number
+      ? '<button class="btn sm" data-num="'+number+'" data-act="detail">Rozpad</button> '+
+        '<button class="btn sm" data-num="'+number+'" data-act="pdf">PDF</button>'
+      : '<span class="muted">—</span>';
+    return '<tr data-row="'+ri+'">'+cells+'<td class="actions">'+act+'</td></tr>';
+  }).join('');
+  show($('listWrap'),true);
+  $('tbody').querySelectorAll('button[data-act]').forEach(b=>{
+    b.onclick=()=> b.dataset.act==='pdf' ? openPdf(b.dataset.num) : toggleDetail(b);
+  });
+}
+const esc=(s)=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ---------- packet breakdown ---------- */
+async function toggleDetail(btn){
+  const tr=btn.closest('tr');
+  const nx=tr.nextElementSibling;
+  if(nx&&nx.classList.contains('detail')){ nx.remove(); return; }
+  btn.disabled=true; btn.textContent='…';
+  try{
+    const r=await api('/api/zasilkovna/packet',{number:btn.dataset.num, version:5, lang:'cs'});
+    const text=decodeBuf(await r.arrayBuffer());
+    if(!r.ok) throw new Error('stav '+r.status);
+    const rows=parseCsv(text);
+    const header=looksLikeHeader(rows);
+    const head=header?rows[0]:rows[0].map((_,i)=>'sl. '+(i+1));
+    const data=header?rows.slice(1):rows;
+    const inner='<div class="detailbox"><div class="dh">Rozpad faktury č. '+esc(btn.dataset.num)+' — '+data.length+' zásilek</div>'+
+      '<div class="tablewrap"><table><thead><tr>'+head.map(h=>'<th>'+esc(h)+'</th>').join('')+'</tr></thead><tbody>'+
+      data.map(r=>'<tr>'+r.map(c=>'<td class="'+(/^-?[\d\s.,]+$/.test(c)?'n':'')+'">'+esc(c)+'</td>').join('')+'</tr>').join('')+
+      '</tbody></table></div></div>';
+    const dtr=document.createElement('tr'); dtr.className='detail';
+    dtr.innerHTML='<td colspan="'+(tr.children.length)+'">'+inner+'</td>';
+    tr.after(dtr);
+  }catch(err){ alert('Rozpad se nepodařilo načíst: '+err.message); }
+  finally{ btn.disabled=false; btn.textContent='Rozpad'; }
+}
+
+/* ---------- PDF (fetch as blob so the token header can be sent) ---------- */
+async function openPdf(number){
+  try{
+    const r=await api('/api/zasilkovna/pdf',{number});
+    if(!r.ok) throw new Error('stav '+r.status);
+    const blob=await r.blob();
+    const url=URL.createObjectURL(blob);
+    window.open(url,'_blank');
+    setTimeout(()=>URL.revokeObjectURL(url),60000);
+  }catch(err){ alert('PDF se nepodařilo otevřít: '+err.message); }
+}
+
+/* ---------- init: zjisti stav backendu ---------- */
+async function init(){
+  // default date range = aktuální měsíc
+  const now=new Date(), y=now.getFullYear(), m=now.getMonth();
+  const iso=(d)=>d.toISOString().slice(0,10);
+  $('from').value=iso(new Date(y,m,1)); $('to').value=iso(new Date(y,m+1,0));
+  try{
+    const r=await fetch('/api/zasilkovna/status'); const st=await r.json();
+    TOKEN_REQUIRED=!!st.tokenRequired;
+    if(!st.configured){ show($('setup'),true); return; }
+    if(TOKEN_REQUIRED){ show($('tokenCard'),true); }
+    else { show($('app'),true); }
+  }catch{ show($('setup'),true); }
+}
+$('tokenBtn').onclick=()=>{
+  TOKEN=$('tokenInput').value.trim();
+  if(!TOKEN) return;
+  show($('tokenCard'),false); show($('app'),true);
+};
+$('loadBtn').onclick=loadInvoices;
+init();
+</script>
