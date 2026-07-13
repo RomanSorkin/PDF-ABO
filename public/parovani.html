@@ -8,6 +8,7 @@
     --muted:#7A8296; --line:#E6E8EF; --line-2:#EFF1F6;
     --accent:#3B3F8F; --kredit:#0F7A52; --kredit-bg:#EAF6F0;
     --debet:#B03A2E; --debet-bg:#FBEDEA; --warn:#B0642E; --warn-bg:#FBF3E8;
+    --zas:#3B3F8F; --zas-bg:#EEEFF9;
     --mono:"JetBrains Mono","SF Mono",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
     --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   }
@@ -45,12 +46,18 @@
   .bar .stat{display:flex;align-items:center;gap:7px}
   .dot{width:10px;height:10px;border-radius:3px;display:inline-block}
   .dot.m{background:var(--kredit)} .dot.w{background:var(--warn)} .dot.u{background:var(--line)}
+  .dot.z{background:var(--zas)}
   .bar b{color:var(--ink)}
   .bar .filter{margin-left:auto;display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
   .bar .filter button{font:inherit;font-size:12.5px;font-weight:600;border:0;background:var(--panel);color:var(--ink-2);
        padding:7px 12px;cursor:pointer;border-right:1px solid var(--line-2)}
   .bar .filter button:last-child{border-right:0}
   .bar .filter button[aria-pressed=true]{background:var(--ink);color:#fff}
+  .bar .btn{font:inherit;font-weight:600;border:1px solid var(--line);background:var(--panel);color:var(--ink);
+       border-radius:8px;cursor:pointer;transition:.12s}
+  .bar .btn:hover{border-color:var(--zas);color:var(--zas)}
+  .bar .btn.sm{padding:6px 12px;font-size:12.5px}
+  .bar .btn:disabled{opacity:.5;cursor:not-allowed}
 
   .tablewrap{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel)}
   table{width:100%;border-collapse:collapse}
@@ -60,6 +67,14 @@
   tbody tr{border-bottom:1px solid var(--line-2)}
   tbody tr.matched{background:var(--kredit-bg)}
   tbody tr.warn{background:var(--warn-bg)}
+  tbody tr.zas{background:var(--zas-bg)}
+  tbody tr.zas td.doc{cursor:pointer}
+  tr.zdetail td{background:#F3F4FB;padding:0}
+  .zbox{padding:10px 14px}
+  .zbox .zh{font-family:var(--mono);font-size:12px;color:var(--ink-2);margin-bottom:8px}
+  .zbox .zt{border:1px solid var(--line);border-radius:8px;overflow:auto;background:#fff}
+  .zbox table{min-width:520px} .zbox td,.zbox th{font-size:12px;padding:6px 9px;white-space:nowrap}
+  .zbox .link{color:var(--kredit);font-weight:700}
   td{padding:8px 12px;vertical-align:middle}
   td.date{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--ink-2);white-space:nowrap;font-size:13px}
   td.vs{font-family:var(--mono);font-size:12.5px;color:var(--ink-2);white-space:nowrap}
@@ -74,6 +89,7 @@
   tr.matched .expl input{border-color:#BFE3D2}
   .pill{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px}
   .pill.m{background:#D9EFE4;color:var(--kredit)} .pill.w{background:#F5E3CC;color:var(--warn)} .pill.u{background:var(--line-2);color:var(--muted)}
+  .pill.z{background:#E1E3F5;color:var(--zas)}
   .hidden{display:none!important}
   .hint{color:var(--muted);font-size:12.5px;margin:16px 0}
   @media(max-width:820px){ .slots{grid-template-columns:1fr} td.party{max-width:110px} }
@@ -111,9 +127,11 @@
   <div id="app" class="hidden">
     <div class="bar">
       <span class="stat"><span class="dot m"></span> spárováno <b id="cMatch">0</b></span>
+      <span class="stat"><span class="dot z"></span> Zásilkovna <b id="cZas">0</b></span>
       <span class="stat"><span class="dot w"></span> VS sedí, částka ne <b id="cWarn">0</b></span>
       <span class="stat"><span class="dot u"></span> nespárováno <b id="cUnmatch">0</b></span>
       <span class="stat">doklady spárováno <b id="cDocs">0</b>/<b id="cDocsAll">0</b></span>
+      <button class="btn sm hidden" id="zasBtn" style="margin-left:6px">Dopárovat Zásilkovnu (API)</button>
       <span class="filter" id="filter">
         <button data-f="all" aria-pressed="true">Vše</button>
         <button data-f="in">Jen příjmy</button>
@@ -184,15 +202,20 @@ function matchAll(){
   if(!MOV) return;
   let docsMatched=new Set();
   MOV.forEach(m=>{
-    m.match=null; m.state='u';
+    m.match=null;
+    let st='u';
     if(INV && m.amount>0 && m.vs && INV.bySym[m.vs]){
       const inv=INV.bySym[m.vs];
       m.match=inv;
       const amtOk=Math.abs(inv.gross-m.amount)<0.01;
-      m.state=amtOk?'m':'w';
+      st=amtOk?'m':'w';
       docsMatched.add(inv.symVar);
       if(!m.edited) m.vysvetleni='Platba od zákazníka';
+    } else if(m.zas){
+      st='z';
+      if(!m.edited) m.vysvetleni='Vyúčtování Zásilkovna'+(m.zas.count?(' – '+m.zas.count+' zásilek'):'');
     }
+    m.state=st;
   });
   return docsMatched.size;
 }
@@ -202,19 +225,24 @@ function render(){
   show($('hint'), !(MOV&&INV));
   show($('app'), !!MOV);
   const body=$('tbody'); body.innerHTML='';
-  let cM=0,cW=0,cU=0;
+  let cM=0,cW=0,cU=0,cZ=0;
   MOV.forEach(m=>{
-    if(m.state==='m')cM++; else if(m.state==='w')cW++; else cU++;
+    if(m.state==='m')cM++; else if(m.state==='w')cW++; else if(m.state==='z')cZ++; else cU++;
     if(filter==='in'&&m.amount<=0) return;
-    if(filter==='unmatched'&&m.state==='m') return;
+    if(filter==='unmatched'&&(m.state==='m'||m.state==='z')) return;
     const tr=document.createElement('tr');
-    tr.className = m.state==='m'?'matched':m.state==='w'?'warn':'';
-    const docCell = m.match
-      ? '<span class="no">č. '+(m.match.number||'?')+'</span> · '+(m.match.name||'—')+' · '+fmt(m.match.gross)+
-        (m.state==='w'?' <span class="warnmark">≠ částka</span>':'')
-      : '—';
+    tr.className = m.state==='m'?'matched':m.state==='w'?'warn':m.state==='z'?'zas':'';
+    let docCell;
+    if(m.match){
+      docCell='<span class="no">č. '+(m.match.number||'?')+'</span> · '+(m.match.name||'—')+' · '+fmt(m.match.gross)+
+        (m.state==='w'?' <span class="warnmark">≠ částka</span>':'');
+    } else if(m.state==='z'){
+      docCell='<span class="no">Zásilkovna</span> · '+m.zas.count+' zásilek'+
+        (m.zas.codSum!=null?' · dobírky '+fmt(m.zas.codSum):'')+' <span class="muted">(rozklikni)</span>';
+    } else docCell='—';
     const pill = m.state==='m'?'<span class="pill m">spárováno</span>'
                : m.state==='w'?'<span class="pill w">VS ✓ / částka ✕</span>'
+               : m.state==='z'?'<span class="pill z">Zásilkovna</span>'
                : (m.amount>0?'<span class="pill u">nespárováno</span>':'');
     tr.innerHTML=
       '<td class="date">'+dispDate(m.book)+'</td>'+
@@ -225,11 +253,34 @@ function render(){
       '<td class="expl"><input value="'+(m.vysvetleni||'').replace(/"/g,'&quot;')+'" placeholder="Vysvětlení…"></td>';
     const inp=tr.querySelector('input');
     inp.addEventListener('input',()=>{ m.vysvetleni=inp.value; m.edited=true; });
+    if(m.state==='z'){ tr.querySelector('td.doc').onclick=()=>toggleZas(tr,m); }
     body.appendChild(tr);
   });
   $('cMatch').textContent=cM; $('cWarn').textContent=cW; $('cUnmatch').textContent=cU;
+  const cz=$('cZas'); if(cz) cz.textContent=cZ;
   $('cDocs').textContent=docsMatched||0; $('cDocsAll').textContent=INV?INV.list.length:0;
 }
+
+/* expandable Zásilkovna breakdown */
+function toggleZas(tr, m){
+  const nx=tr.nextElementSibling;
+  if(nx&&nx.classList.contains('zdetail')){ nx.remove(); return; }
+  const z=m.zas; const head=z.header, rows=z.rows;
+  const oCol=z.orderCol;
+  const th='<tr>'+head.map(h=>'<th>'+escH(h)+'</th>').join('')+'</tr>';
+  const trs=rows.map(r=>'<tr>'+r.map((c,ci)=>{
+    let cell=escH(c);
+    if(ci===oCol && INV && c && INV.bySym[String(c).trim()]) cell='<span class="link">'+cell+' ✓</span>';
+    return '<td>'+cell+'</td>';
+  }).join('')+'</tr>').join('');
+  const matchedOrders = oCol>=0 && INV ? rows.filter(r=>INV.bySym[String(r[oCol]||'').trim()]).length : 0;
+  const dtr=document.createElement('tr'); dtr.className='zdetail';
+  dtr.innerHTML='<td colspan="6"><div class="zbox"><div class="zh">Rozpad vyúčtování Zásilkovny (VS '+m.vs+') — '+rows.length+' zásilek'+
+    (oCol>=0&&INV?', z toho '+matchedOrders+' napárováno na vydané doklady (✓)':'')+'</div>'+
+    '<div class="zt"><table><thead>'+th+'</thead><tbody>'+trs+'</tbody></table></div></div></td>';
+  tr.after(dtr);
+}
+const escH=(s)=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 /* ---------- file loading ---------- */
 function fail(msg){ const e=$('errbox'); e.textContent='Chyba: '+msg; show(e,true); }
@@ -267,4 +318,96 @@ $('filter').querySelectorAll('button').forEach(b=>b.onclick=()=>{
   $('filter').querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',x===b));
   render();
 });
+
+/* ================= Zásilkovna API (přes backend proxy) ================= */
+let ZAS_OK=false, ZAS_TOKEN_REQ=false, ZAS_TOKEN='';
+const isZas=(party)=>/z[aá]silkov|packeta/i.test(party||'');
+
+async function zasApi(path, params){
+  const u=new URL(path, location.origin);
+  for(const k in params){ const v=params[k]; if(v!=null&&v!=='') u.searchParams.set(k,v); }
+  const headers={}; if(ZAS_TOKEN) headers['x-app-token']=ZAS_TOKEN;
+  return fetch(u,{headers});
+}
+function zasDecode(buf){ let s=new TextDecoder('utf-8',{fatal:false}).decode(buf); if(/\uFFFD/.test(s)) s=new TextDecoder('windows-1250').decode(buf); return s; }
+function zasCsv(text){
+  text=text.replace(/\r\n?/g,'\n').replace(/\n+$/,''); if(!text) return [];
+  const first=text.split('\n')[0];
+  const delim=[';','\t',','].map(d=>[d,first.split(d).length]).sort((a,b)=>b[1]-a[1])[0][0];
+  const rows=[]; let row=[],cur='',q=false;
+  for(let i=0;i<text.length;i++){ const c=text[i];
+    if(q){ if(c==='"'){ if(text[i+1]==='"'){cur+='"';i++;} else q=false;} else cur+=c; }
+    else if(c==='"') q=true;
+    else if(c===delim){ row.push(cur); cur=''; }
+    else if(c==='\n'){ row.push(cur); rows.push(row); row=[]; cur=''; }
+    else cur+=c;
+  }
+  row.push(cur); rows.push(row);
+  return rows.filter(r=>r.some(c=>c.trim()!==''));
+}
+const zasHeaderRow=(rows)=> rows.length>1 && rows[0].some(c=>/[A-Za-zÁ-ž]/.test(c)) && !/^\d{6,}$/.test(rows[0][0]||'');
+// najdi sloupec s číslem objednávky (hodnoty odpovídají symVar vydaných dokladů, nebo hlavička "obj")
+function zasOrderCol(header, rows, dataRows){
+  if(header){ const idx=header.findIndex(h=>/obj|order/i.test(h)); if(idx>=0) return idx; }
+  if(INV){ const cols=(dataRows[0]||[]).length; let best=-1,hits=0;
+    for(let c=0;c<cols;c++){ let h=0; for(const r of dataRows){ if(INV.bySym[String(r[c]||'').trim()]) h++; } if(h>hits){hits=h;best=c;} }
+    if(hits>0) return best; }
+  return -1;
+}
+
+// zkus rozpad: nejdřív podle čísla, pak podle var_symbolu (pohoda formát)
+async function resolveZas(vs){
+  for(const attempt of [{path:'/api/zasilkovna/packet',p:{number:vs,version:5,lang:'cs'}},
+                        {path:'/api/zasilkovna/packet-pohoda',p:{var_symbol:vs,lang:'cs'}}]){
+    try{
+      const r=await zasApi(attempt.path, attempt.p);
+      if(r.status===401){ ZAS_TOKEN=''; throw new Error('401'); }
+      if(!r.ok) continue;
+      const rows=zasCsv(zasDecode(await r.arrayBuffer()));
+      if(rows.length){
+        const header=zasHeaderRow(rows);
+        const head=header?rows[0]:rows[0].map((_,i)=>'sl. '+(i+1));
+        const data=header?rows.slice(1):rows;
+        if(!data.length) continue;
+        const orderCol=zasOrderCol(header?rows[0]:null, rows, data);
+        return {header:head, rows:data, count:data.length, orderCol};
+      }
+    }catch(e){ if(e.message==='401') throw e; }
+  }
+  return null;
+}
+
+async function processZasilkovna(){
+  if(!ZAS_OK){ fail('Backend Zásilkovny není nakonfigurovaný (nastav ZASILKOVNA_KEY/PASSWORD v Railway).'); return; }
+  if(ZAS_TOKEN_REQ && !ZAS_TOKEN){
+    const t=prompt('Zadej APP_TOKEN (endpointy Zásilkovny jsou zamčené):'); if(!t) return; ZAS_TOKEN=t.trim();
+  }
+  const cand=MOV.filter(m=>m.amount>0 && m.state!=='m' && m.state!=='w' && !m.zas && m.vs && isZas(m.party));
+  if(!cand.length){ fail('Žádné nespárované příchozí platby, které vypadají jako Zásilkovna.'); return; }
+  show($('errbox'),false);
+  const btn=$('zasBtn'); btn.disabled=true;
+  let done=0, hit=0;
+  for(const m of cand){
+    btn.textContent='Dopárovávám… '+(++done)+'/'+cand.length;
+    try{
+      const z=await resolveZas(m.vs);
+      if(z){ m.zas=z; hit++; }
+    }catch(e){
+      if(e.message==='401'){ fail('Neplatný APP_TOKEN.'); btn.disabled=false; btn.textContent='Dopárovat Zásilkovnu (API)'; return; }
+    }
+  }
+  btn.disabled=false; btn.textContent='Dopárovat Zásilkovnu (API)';
+  render();
+  if(!hit) fail('Zásilkovna nevrátila rozpad pro žádné z '+cand.length+' VS. Otevři konzoli / zkus jiný formát — pošli mi surové CSV a doladím.');
+}
+
+async function initZas(){
+  try{
+    const r=await fetch('/api/zasilkovna/status'); const st=await r.json();
+    ZAS_OK=!!st.configured; ZAS_TOKEN_REQ=!!st.tokenRequired;
+    show($('zasBtn'), ZAS_OK);
+  }catch{ ZAS_OK=false; }
+}
+$('zasBtn').onclick=processZasilkovna;
+initZas();
 </script>
