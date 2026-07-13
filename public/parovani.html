@@ -71,10 +71,15 @@
   tbody tr.zas td.doc{cursor:pointer}
   tr.zdetail td{background:#F3F4FB;padding:0}
   .zbox{padding:10px 14px}
-  .zbox .zh{font-family:var(--mono);font-size:12px;color:var(--ink-2);margin-bottom:8px}
-  .zbox .zt{border:1px solid var(--line);border-radius:8px;overflow:auto;background:#fff}
+  .zbox .zh{font-family:var(--mono);font-size:12px;color:var(--ink-2);margin-bottom:8px;display:flex;align-items:center;gap:10px}
+  .zbox .zclose{font:inherit;font-size:11.5px;font-weight:700;border:1px solid var(--zas);color:var(--zas);
+       background:#fff;border-radius:6px;padding:3px 9px;cursor:pointer}
+  .zbox .zclose:hover{background:var(--zas);color:#fff}
+  .zbox .zt{border:1px solid var(--line);border-radius:8px;overflow:auto;background:#fff;max-height:300px}
   .zbox table{min-width:520px} .zbox td,.zbox th{font-size:12px;padding:6px 9px;white-space:nowrap}
+  .zbox th{position:sticky;top:0;background:#fff}
   .zbox .link{color:var(--kredit);font-weight:700}
+  td.doc .caret{color:var(--zas);font-weight:700;margin-right:4px;display:inline-block;width:10px}
   td{padding:8px 12px;vertical-align:middle}
   td.date{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--ink-2);white-space:nowrap;font-size:13px}
   td.vs{font-family:var(--mono);font-size:12.5px;color:var(--ink-2);white-space:nowrap}
@@ -237,7 +242,7 @@ function render(){
       docCell='<span class="no">č. '+(m.match.number||'?')+'</span> · '+(m.match.name||'—')+' · '+fmt(m.match.gross)+
         (m.state==='w'?' <span class="warnmark">≠ částka</span>':'');
     } else if(m.state==='z'){
-      docCell='<span class="no">Zásilkovna</span> · '+m.zas.count+' zásilek'+
+      docCell='<span class="caret">▸</span><span class="no">Zásilkovna</span> · '+m.zas.count+' zásilek'+
         (m.zas.codSum!=null?' · dobírky '+fmt(m.zas.codSum):'')+' <span class="muted">(rozklikni)</span>';
     } else docCell='—';
     const pill = m.state==='m'?'<span class="pill m">spárováno</span>'
@@ -262,9 +267,15 @@ function render(){
 }
 
 /* expandable Zásilkovna breakdown */
+function setCaret(tr, open){ const c=tr.querySelector('td.doc .caret'); if(c) c.textContent=open?'▾':'▸'; }
+function collapseZas(tr){
+  const nx=tr.nextElementSibling;
+  if(nx&&nx.classList.contains('zdetail')) nx.remove();
+  setCaret(tr,false);
+}
 function toggleZas(tr, m){
   const nx=tr.nextElementSibling;
-  if(nx&&nx.classList.contains('zdetail')){ nx.remove(); return; }
+  if(nx&&nx.classList.contains('zdetail')){ collapseZas(tr); return; }
   const z=m.zas; const head=z.header, rows=z.rows;
   const oCol=z.orderCol;
   const th='<tr>'+head.map(h=>'<th>'+escH(h)+'</th>').join('')+'</tr>';
@@ -275,10 +286,14 @@ function toggleZas(tr, m){
   }).join('')+'</tr>').join('');
   const matchedOrders = oCol>=0 && INV ? rows.filter(r=>INV.bySym[String(r[oCol]||'').trim()]).length : 0;
   const dtr=document.createElement('tr'); dtr.className='zdetail';
-  dtr.innerHTML='<td colspan="6"><div class="zbox"><div class="zh">Rozpad vyúčtování Zásilkovny (VS '+m.vs+') — '+rows.length+' zásilek'+
+  dtr.innerHTML='<td colspan="6"><div class="zbox"><div class="zh">'+
+    '<button class="zclose">✕ Sbalit</button>'+
+    'Rozpad vyúčtování Zásilkovny (VS '+m.vs+') — '+rows.length+' zásilek'+
     (oCol>=0&&INV?', z toho '+matchedOrders+' napárováno na vydané doklady (✓)':'')+'</div>'+
     '<div class="zt"><table><thead>'+th+'</thead><tbody>'+trs+'</tbody></table></div></div></td>';
   tr.after(dtr);
+  setCaret(tr,true);
+  dtr.querySelector('.zclose').onclick=(e)=>{ e.stopPropagation(); collapseZas(tr); };
 }
 const escH=(s)=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
