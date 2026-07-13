@@ -13,8 +13,8 @@ const PORT = process.env.PORT || 3000;
 
 // --- Zásilkovna / Packeta credentials (set these in Railway → Variables) ---
 const ZAS_BASE = 'https://www.zasilkovna.cz/api';
-const ZAS_KEY = process.env.ZASILKOVNA_KEY || '';
-const ZAS_PW  = process.env.ZASILKOVNA_PASSWORD || '';
+const ZAS_KEY = (process.env.ZASILKOVNA_KEY || '').trim();
+const ZAS_PW  = (process.env.ZASILKOVNA_PASSWORD || '').trim();
 // Optional access gate: if APP_TOKEN is set, /api/zasilkovna/* requires the
 // matching token in the x-app-token header. If unset, the endpoints are open.
 const APP_TOKEN = process.env.APP_TOKEN || '';
@@ -61,8 +61,20 @@ const server = http.createServer(async (req, res) => {
   if (path === '/healthz') return send(res, 200, JSONT, '{"ok":true}');
 
   // Non-sensitive: lets the UI know whether the backend is ready and gated.
-  if (path === '/api/zasilkovna/status')
-    return send(res, 200, JSONT, JSON.stringify({ configured: zasConfigured(), tokenRequired: Boolean(APP_TOKEN) }));
+  // Adds structural diagnostics (lengths/shape, never the values) to help spot
+  // a swapped key/password or stray whitespace. Gated by token when APP_TOKEN is set.
+  if (path === '/api/zasilkovna/status') {
+    const authed = !APP_TOKEN || req.headers['x-app-token'] === APP_TOKEN;
+    const body = { configured: zasConfigured(), tokenRequired: Boolean(APP_TOKEN) };
+    if (authed) {
+      body.keyLength = ZAS_KEY.length;
+      body.passwordLength = ZAS_PW.length;
+      body.keyLooksHex = /^[0-9a-f]+$/i.test(ZAS_KEY);
+      body.passwordLooksHex = /^[0-9a-f]+$/i.test(ZAS_PW);
+      body.keyEqualsPassword = Boolean(ZAS_KEY) && ZAS_KEY === ZAS_PW;
+    }
+    return send(res, 200, JSONT, JSON.stringify(body));
+  }
 
   // Zásilkovna proxy routes
   if (path.startsWith('/api/zasilkovna/')) {
