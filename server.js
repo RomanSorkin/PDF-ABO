@@ -19,6 +19,13 @@ const ZAS_PW  = (process.env.ZASILKOVNA_PASSWORD || '').trim();
 // matching token in the x-app-token header. If unset, the endpoints are open.
 const APP_TOKEN = process.env.APP_TOKEN || '';
 
+// --- Gmail MCP server (pro automatické stažení GoPay vyúčtování z e-mailu) ---
+// GMAIL_MCP_URL = veřejná /mcp adresa tvého Gmail MCP serveru.
+const GMAIL_MCP_URL = (process.env.GMAIL_MCP_URL || '').trim();
+const GMAIL_MCP_ACCOUNT = (process.env.GMAIL_MCP_ACCOUNT || 'varjag.claude@gmail.com').trim();
+const GMAIL_MCP_QUERY = (process.env.GMAIL_MCP_QUERY || 'GoPay vyúčtování').trim();
+const gmailConfigured = () => Boolean(GMAIL_MCP_URL);
+
 const zasConfigured = () => Boolean(ZAS_KEY && ZAS_PW);
 
 const TYPES = {
@@ -54,11 +61,94 @@ async function proxyZasilkovna(subpath, allowed, url, res) {
   }
 }
 
+// ---- Minimal MCP (Streamable HTTP) client: initialize -> initialized -> tools/call ----
+// Handles both application/json and text/event-stream responses. No dependencies.
+function mcpHeaders(sid) {
+  const h = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' };
+  if (sid) h['Mcp-Session-Id'] = sid;
+  return h;
+}
+async function mcpRead(resp) {
+  const ct = resp.headers.get('content-type') || '';
+  const text = await resp.text();
+  if (ct.includes('text/event-stream')) {
+    const msgs = [];
+    for (const line of text.split(/\r?\n/)) {
+      if (line.startsWith('data:')) { try { msgs.push(JSON.parse(line.slice(5).trim())); } catch {} }
+    }
+    return msgs;
+  }
+  try { return [JSON.parse(text)]; } catch { return []; }
+}
+async function mcpInit(url) {
+  const body = { jsonrpc: '2.0', id: 1, method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'abo-gpc-viewer', version: '1.0' } } };
+  const r = await fetch(url, { method: 'POST', headers: mcpHeaders(''), body: JSON.stringify(body) });
+  if (!r.ok && r.status !== 200) throw new Error('MCP initialize HTTP ' + r.status);
+  const sid = r.headers.get('mcp-session-id') || r.headers.get('Mcp-Session-Id') || '';
+  await mcpRead(r);
+  // notifications/initialized (fire and forget)
+  try { await fetch(url, { method: 'POST', headers: mcpHeaders(sid), body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) }); } catch {}
+  return sid;
+}
+async function mcpTool(url, sid, name, args, id) {
+  const r = await fetch(url, { method: 'POST', headers: mcpHeaders(sid),
+    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }) });
+  const msgs = await mcpRead(r);
+  const resp = msgs.find(m => m && m.id === id) || msgs[msgs.length - 1];
+  if (!resp) throw new Error('MCP: prázdná odpověď od nástroje ' + name);
+  if (resp.error) throw new Error('MCP ' + name + ': ' + (resp.error.message || 'chyba'));
+  const content = (resp.result && resp.result.content) || [];
+  const textPart = content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+  return textPart;
+}
+const jparse = (s) => { try { return JSON.parse(s); } catch { return null; } };
+
+// Pull GoPay clearing XML attachments from the mailbox via the Gmail MCP server.
+async function fetchGopayClearings() {
+  const url = GMAIL_MCP_URL, account = GMAIL_MCP_ACCOUNT;
+  const sid = await mcpInit(url);
+  const listTxt = await mcpTool(url, sid, 'list_emails', { account, query: GMAIL_MCP_QUERY, max_results: 50 }, 2);
+  const listData = jparse(listTxt);
+  const emails = (Array.isArray(listData) ? listData : [listData]).flatMap(x => (x && x.emails) || []);
+  const out = [];
+  let id = 10;
+  for (const em of emails) {
+    const attTxt = await mcpTool(url, sid, 'list_attachments', { account, message_id: em.id }, id++);
+    const attData = jparse(attTxt) || {};
+    const xmls = (attData.attachments || []).filter(a => /\.xml$/i.test(a.filename || '') || /xml/i.test(a.mimeType || ''));
+    for (const a of xmls) {
+      const gotTxt = await mcpTool(url, sid, 'get_attachment', { account, message_id: em.id, attachment_id: a.attachmentId }, id++);
+      const got = jparse(gotTxt);
+      if (got && got.data) out.push({ filename: a.filename, xml: Buffer.from(got.data, 'base64').toString('utf8') });
+    }
+  }
+  return out;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const path = url.pathname;
 
   if (path === '/healthz') return send(res, 200, JSONT, '{"ok":true}');
+
+  // GoPay: stav (je nakonfigurovaný MCP most na e-mail?)
+  if (path === '/api/gopay/status')
+    return send(res, 200, JSONT, JSON.stringify({ configured: gmailConfigured(), tokenRequired: Boolean(APP_TOKEN), account: GMAIL_MCP_ACCOUNT }));
+
+  // GoPay: stáhni clearing XML z e-mailu přes MCP server
+  if (path === '/api/gopay/clearings') {
+    if (APP_TOKEN && req.headers['x-app-token'] !== APP_TOKEN)
+      return send(res, 401, JSONT, JSON.stringify({ error: 'Neplatný nebo chybějící přístupový token.' }));
+    if (!gmailConfigured())
+      return send(res, 503, JSONT, JSON.stringify({ error: 'Není nastaveno GMAIL_MCP_URL (adresa tvého Gmail MCP serveru).' }));
+    try {
+      const clearings = await fetchGopayClearings();
+      return send(res, 200, JSONT, JSON.stringify({ count: clearings.length, clearings }));
+    } catch (e) {
+      return send(res, 502, JSONT, JSON.stringify({ error: 'Stažení z e-mailu selhalo: ' + (e.message || e) }));
+    }
+  }
 
   // Non-sensitive: lets the UI know whether the backend is ready and gated.
   // Adds structural diagnostics (lengths/shape, never the values) to help spot
