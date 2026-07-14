@@ -9,6 +9,8 @@
     --accent:#3B3F8F; --kredit:#0F7A52; --kredit-bg:#EAF6F0;
     --debet:#B03A2E; --debet-bg:#FBEDEA; --warn:#B0642E; --warn-bg:#FBF3E8;
     --zas:#3B3F8F; --zas-bg:#EEEFF9;
+    --gopay:#0E7490; --gopay-bg:#E4F2F6;
+    --gopay:#8A4FBF; --gopay-bg:#F4ECFB;
     --mono:"JetBrains Mono","SF Mono",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
     --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   }
@@ -31,7 +33,7 @@
   input[type=file]{display:none}
 
   /* two upload slots */
-  .slots{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:26px 0 8px}
+  .slots{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin:26px 0 8px}
   .slot{border:1.5px dashed var(--line);border-radius:14px;background:var(--panel);padding:24px;transition:.15s;cursor:pointer}
   .slot.hot{border-color:var(--accent);background:#F5F5FD}
   .slot.done{border-style:solid;border-color:var(--kredit);background:var(--kredit-bg)}
@@ -47,6 +49,7 @@
   .dot{width:10px;height:10px;border-radius:3px;display:inline-block}
   .dot.m{background:var(--kredit)} .dot.w{background:var(--warn)} .dot.u{background:var(--line)}
   .dot.z{background:var(--zas)}
+  .dot.g{background:var(--gopay)}
   .bar b{color:var(--ink)}
   .bar .filter{margin-left:auto;display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
   .bar .filter button{font:inherit;font-size:12.5px;font-weight:600;border:0;background:var(--panel);color:var(--ink-2);
@@ -69,7 +72,10 @@
   tbody tr.warn{background:var(--warn-bg)}
   tbody tr.zas{background:var(--zas-bg)}
   tbody tr.zas td.doc{cursor:pointer}
+  tbody tr.gopay{background:var(--gopay-bg)}
+  tbody tr.gopay td.doc{cursor:pointer}
   tr.zdetail td{background:#F3F4FB;padding:0}
+  tr.gdetail td{background:#EAF4F7;padding:0}
   .zbox{padding:10px 14px}
   .zbox .zh{font-family:var(--mono);font-size:12px;color:var(--ink-2);margin-bottom:8px;display:flex;align-items:center;gap:10px}
   .zbox .zclose{font:inherit;font-size:11.5px;font-weight:700;border:1px solid var(--zas);color:var(--zas);
@@ -95,10 +101,10 @@
   .pill{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px}
   .pill.m{background:#D9EFE4;color:var(--kredit)} .pill.w{background:#F5E3CC;color:var(--warn)} .pill.u{background:var(--line-2);color:var(--muted)}
   .pill.z{background:#E1E3F5;color:var(--zas)}
+  .pill.g{background:#D2E9EF;color:var(--gopay)}
   .hidden{display:none!important}
   .hint{color:var(--muted);font-size:12.5px;margin:16px 0}
-  @media(max-width:820px){ .slots{grid-template-columns:1fr} td.party{max-width:110px} }
-</style>
+  @media(max-width:820px){ .slots{grid-template-columns:1fr} td.party{max-width:110px} }</style>
 
 <header class="top">
   <div class="wrap">
@@ -124,6 +130,12 @@
       <div class="fn" id="xmlFn"></div><div class="num" id="xmlNum"></div>
       <input type="file" id="fileXml" accept=".xml,text/xml,application/xml">
     </div>
+    <div class="slot" id="slotGopay">
+      <h3>3 · GoPay clearing (.xml)</h3>
+      <p>Vyúčtování GoPay — příloha z mailu. Můžeš vložit i více souborů.</p>
+      <div class="fn" id="gopayFn"></div><div class="num" id="gopayNum"></div>
+      <input type="file" id="fileGopay" accept=".xml,text/xml,application/xml" multiple>
+    </div>
   </div>
 
   <div id="errbox" class="err hidden"></div>
@@ -133,6 +145,7 @@
     <div class="bar">
       <span class="stat"><span class="dot m"></span> spárováno <b id="cMatch">0</b></span>
       <span class="stat"><span class="dot z"></span> Zásilkovna <b id="cZas">0</b></span>
+      <span class="stat"><span class="dot g"></span> GoPay <b id="cGopay">0</b></span>
       <span class="stat"><span class="dot w"></span> VS sedí, částka ne <b id="cWarn">0</b></span>
       <span class="stat"><span class="dot u"></span> nespárováno <b id="cUnmatch">0</b></span>
       <span class="stat">doklady spárováno <b id="cDocs">0</b>/<b id="cDocsAll">0</b></span>
@@ -200,8 +213,31 @@ function parseInvoices(text){
   return {list, bySym};
 }
 
+/* ---------- GoPay clearing XML (příloha vyúčtování) ---------- */
+function parseGoPayClearing(text){
+  const doc=new DOMParser().parseFromString(text,'application/xml');
+  if(doc.querySelector('parsererror')) throw new Error('GoPay XML se nepodařilo načíst.');
+  const cl=byLocal(doc,'clearing')[0];
+  if(!cl) throw new Error('Není to GoPay clearing XML (chybí <clearing>).');
+  const a=(n)=>cl.getAttribute(n)||'';
+  const movements=byLocal(cl,'movement').map(m=>({
+    orderId:(m.getAttribute('orderId')||'').trim(),
+    amount:parseFloat(m.getAttribute('amount'))||0,
+    counterparty:(m.getAttribute('counterpartyName')||'').trim(),
+    date:(m.getAttribute('datePerformed')||'').trim(),
+  }));
+  return {
+    sym:(a('variableSymbol')||a('clearingId')).trim(),
+    amountTransfer:parseFloat(a('amountTransfer')||a('amountSent'))||0,
+    amountGross:parseFloat(a('amount'))||0,
+    amountFee:(parseFloat(a('amountFee'))||0)+(parseFloat(a('amountFeeExternal'))||0),
+    from:a('dateClearedFrom'), to:a('dateClearedTo'),
+    movements
+  };
+}
+
 /* ---------- state ---------- */
-let MOV=null, INV=null, filter='all';
+let MOV=null, INV=null, GOPAY=null, filter='all';
 
 function matchAll(){
   if(!MOV) return;
@@ -219,6 +255,10 @@ function matchAll(){
     } else if(m.zas){
       st='z';
       if(!m.edited) m.vysvetleni='Vyúčtování Zásilkovna'+(m.zas.count?(' – '+m.zas.count+' zásilek'):'');
+    } else if(GOPAY && m.amount>0 && m.vs && GOPAY[m.vs] && /gopay/i.test(m.party)){
+      m.gopay=GOPAY[m.vs];
+      st='g';
+      if(!m.edited) m.vysvetleni='Vyúčtování GoPay – '+m.gopay.movements.length+' plateb';
     }
     m.state=st;
   });
@@ -230,13 +270,13 @@ function render(){
   show($('hint'), !(MOV&&INV));
   show($('app'), !!MOV);
   const body=$('tbody'); body.innerHTML='';
-  let cM=0,cW=0,cU=0,cZ=0;
+  let cM=0,cW=0,cU=0,cZ=0,cG=0;
   MOV.forEach(m=>{
-    if(m.state==='m')cM++; else if(m.state==='w')cW++; else if(m.state==='z')cZ++; else cU++;
+    if(m.state==='m')cM++; else if(m.state==='w')cW++; else if(m.state==='z')cZ++; else if(m.state==='g')cG++; else cU++;
     if(filter==='in'&&m.amount<=0) return;
-    if(filter==='unmatched'&&(m.state==='m'||m.state==='z')) return;
+    if(filter==='unmatched'&&(m.state==='m'||m.state==='z'||m.state==='g')) return;
     const tr=document.createElement('tr');
-    tr.className = m.state==='m'?'matched':m.state==='w'?'warn':m.state==='z'?'zas':'';
+    tr.className = m.state==='m'?'matched':m.state==='w'?'warn':m.state==='z'?'zas':m.state==='g'?'gopay':'';
     let docCell;
     if(m.match){
       docCell='<span class="no">č. '+(m.match.number||'?')+'</span> · '+(m.match.name||'—')+' · '+fmt(m.match.gross)+
@@ -244,10 +284,15 @@ function render(){
     } else if(m.state==='z'){
       docCell='<span class="caret">▸</span><span class="no">Zásilkovna</span> · '+m.zas.count+' zásilek'+
         (m.zas.codSum!=null?' · dobírky '+fmt(m.zas.codSum):'')+' <span class="muted">(rozklikni)</span>';
+    } else if(m.state==='g'){
+      const g=m.gopay, amtOk=Math.abs(g.amountTransfer-m.amount)<0.01;
+      docCell='<span class="caret">▸</span><span class="no">GoPay</span> · '+g.movements.length+' plateb · poplatek '+fmt(g.amountFee)+
+        (amtOk?'':' <span class="warnmark">≠ částka</span>')+' <span class="muted">(rozklikni)</span>';
     } else docCell='—';
     const pill = m.state==='m'?'<span class="pill m">spárováno</span>'
                : m.state==='w'?'<span class="pill w">VS ✓ / částka ✕</span>'
                : m.state==='z'?'<span class="pill z">Zásilkovna</span>'
+               : m.state==='g'?'<span class="pill g">GoPay</span>'
                : (m.amount>0?'<span class="pill u">nespárováno</span>':'');
     tr.innerHTML=
       '<td class="date">'+dispDate(m.book)+'</td>'+
@@ -259,10 +304,12 @@ function render(){
     const inp=tr.querySelector('input');
     inp.addEventListener('input',()=>{ m.vysvetleni=inp.value; m.edited=true; });
     if(m.state==='z'){ tr.querySelector('td.doc').onclick=()=>toggleZas(tr,m); }
+    if(m.state==='g'){ tr.querySelector('td.doc').onclick=()=>toggleGoPay(tr,m); }
     body.appendChild(tr);
   });
   $('cMatch').textContent=cM; $('cWarn').textContent=cW; $('cUnmatch').textContent=cU;
   const cz=$('cZas'); if(cz) cz.textContent=cZ;
+  const cg=$('cGopay'); if(cg) cg.textContent=cG;
   $('cDocs').textContent=docsMatched||0; $('cDocsAll').textContent=INV?INV.list.length:0;
 }
 
@@ -297,6 +344,40 @@ function toggleZas(tr, m){
 }
 const escH=(s)=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
+/* expandable GoPay breakdown */
+function collapseGoPay(tr){
+  const nx=tr.nextElementSibling;
+  if(nx&&nx.classList.contains('gdetail')) nx.remove();
+  setCaret(tr,false);
+}
+function toggleGoPay(tr, m){
+  const nx=tr.nextElementSibling;
+  if(nx&&nx.classList.contains('gdetail')){ collapseGoPay(tr); return; }
+  const g=m.gopay;
+  let matched=0;
+  const trs=g.movements.map(mv=>{
+    const inv=INV?INV.bySym[mv.orderId]:null; if(inv) matched++;
+    const ord=inv?'<span class="link">'+escH(mv.orderId)+' ✓</span>':escH(mv.orderId);
+    return '<tr><td>'+mv.date+'</td><td>'+ord+'</td><td>'+(inv?escH(inv.name):'—')+
+      '</td><td class="n" style="text-align:right">'+fmt(mv.amount)+'</td><td>'+escH(mv.counterparty)+'</td></tr>';
+  }).join('');
+  const dtr=document.createElement('tr'); dtr.className='gdetail';
+  dtr.innerHTML='<td colspan="6"><div class="zbox"><div class="zh">'+
+    '<button class="zclose gclose">✕ Sbalit</button>'+
+    'Rozpad GoPay (VS '+m.vs+', '+g.from+'–'+g.to+') — '+g.movements.length+' plateb, '+
+    'hrubě '+fmt(g.amountGross)+' − poplatek '+fmt(g.amountFee)+' = '+fmt(g.amountTransfer)+
+    (INV?', z toho '+matched+' napárováno na vydané doklady (✓)':'')+'</div>'+
+    '<div class="zt"><table><thead><tr><th>Datum</th><th>Objednávka</th><th>Doklad</th>'+
+    '<th style="text-align:right">Částka</th><th>Karta/účet</th></tr></thead><tbody>'+trs+'</tbody></table></div></div></td>';
+  tr.after(dtr);
+  setCaret(tr,true);
+  dtr.querySelector('.gclose').onclick=(e)=>{ e.stopPropagation(); collapseGoPay(tr); };
+}
+// GoPay close button uses the Zásilkovna accent color; override to GoPay tone
+(function(){ const s=document.createElement('style');
+  s.textContent='.gclose{border-color:var(--gopay)!important;color:var(--gopay)!important}.gclose:hover{background:var(--gopay)!important;color:#fff!important}tr.gopay td.doc .caret{color:var(--gopay)}';
+  document.head.appendChild(s); })();
+
 /* ---------- file loading ---------- */
 function fail(msg){ const e=$('errbox'); e.textContent='Chyba: '+msg; show(e,true); }
 function readGpc(file){
@@ -315,11 +396,32 @@ function readXml(file){
     }catch(err){ fail(err.message); } };
   rd.readAsText(file,'utf-8');
 }
+function readGopay(fileList){
+  const files=[...fileList]; if(!files.length) return;
+  GOPAY=GOPAY||{}; let loaded=0, done=0, errs=0;
+  files.forEach(file=>{
+    const rd=new FileReader();
+    rd.onload=e=>{
+      try{ const cl=parseGoPayClearing(e.target.result); if(cl.sym){ GOPAY[cl.sym]=cl; loaded++; } }
+      catch(err){ errs++; }
+      if(++done===files.length){
+        show($('errbox'), errs>0); if(errs>0) $('errbox').textContent='Chyba: '+errs+' z '+files.length+' souborů není platný GoPay clearing.';
+        $('slotGopay').classList.add('done');
+        $('gopayFn').textContent=files.length>1?files.length+' souborů':files[0].name;
+        $('gopayNum').textContent=Object.keys(GOPAY).length+' vyúčtování';
+        if(MOV) render();
+      }
+    };
+    rd.readAsText(file,'utf-8');
+  });
+}
 
 $('fileGpc').onchange=e=>{ if(e.target.files[0]) readGpc(e.target.files[0]); };
 $('fileXml').onchange=e=>{ if(e.target.files[0]) readXml(e.target.files[0]); };
+$('fileGopay').onchange=e=>{ if(e.target.files.length) readGopay(e.target.files); };
 $('slotGpc').onclick=e=>{ if(e.target.tagName!=='INPUT') $('fileGpc').click(); };
 $('slotXml').onclick=e=>{ if(e.target.tagName!=='INPUT') $('fileXml').click(); };
+$('slotGopay').onclick=e=>{ if(e.target.tagName!=='INPUT') $('fileGopay').click(); };
 
 function dnd(slot, handler){
   ['dragenter','dragover'].forEach(ev=>slot.addEventListener(ev,e=>{e.preventDefault();slot.classList.add('hot');}));
@@ -327,6 +429,12 @@ function dnd(slot, handler){
   slot.addEventListener('drop',e=>{e.preventDefault();slot.classList.remove('hot');const f=e.dataTransfer.files[0];if(f)handler(f);});
 }
 dnd($('slotGpc'),readGpc); dnd($('slotXml'),readXml);
+// GoPay slot: accept multiple dropped files
+(function(slot){
+  ['dragenter','dragover'].forEach(ev=>slot.addEventListener(ev,e=>{e.preventDefault();slot.classList.add('hot');}));
+  ['dragleave','drop'].forEach(ev=>slot.addEventListener(ev,e=>{e.preventDefault();if(ev!=='drop')slot.classList.remove('hot');}));
+  slot.addEventListener('drop',e=>{e.preventDefault();slot.classList.remove('hot');if(e.dataTransfer.files.length)readGopay(e.dataTransfer.files);});
+})($('slotGopay'));
 
 $('filter').querySelectorAll('button').forEach(b=>b.onclick=()=>{
   filter=b.dataset.f;
