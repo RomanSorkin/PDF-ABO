@@ -150,6 +150,7 @@
       <span class="stat"><span class="dot u"></span> nespárováno <b id="cUnmatch">0</b></span>
       <span class="stat">doklady spárováno <b id="cDocs">0</b>/<b id="cDocsAll">0</b></span>
       <button class="btn sm hidden" id="zasBtn" style="margin-left:6px">Dopárovat Zásilkovnu (API)</button>
+      <button class="btn sm hidden" id="gopayBtn">Načíst GoPay z e-mailu</button>
       <span class="filter" id="filter">
         <button data-f="all" aria-pressed="true">Vše</button>
         <button data-f="in">Jen příjmy</button>
@@ -533,4 +534,40 @@ async function initZas(){
 }
 $('zasBtn').onclick=processZasilkovna;
 initZas();
+
+/* ================= GoPay z e-mailu (přes backend → Gmail MCP) ================= */
+let GOPAY_OK=false, GOPAY_TOKEN_REQ=false;
+async function loadGopayFromMail(){
+  if(!GOPAY_OK){ fail('Načítání z e-mailu není nastavené (chybí GMAIL_MCP_URL v Railway).'); return; }
+  if(GOPAY_TOKEN_REQ && !ZAS_TOKEN){
+    const t=prompt('Zadej APP_TOKEN (endpointy jsou zamčené):'); if(!t) return; ZAS_TOKEN=t.trim();
+  }
+  const btn=$('gopayBtn'); btn.disabled=true; btn.textContent='Načítám z e-mailu…'; show($('errbox'),false);
+  try{
+    const headers={}; if(ZAS_TOKEN) headers['x-app-token']=ZAS_TOKEN;
+    const r=await fetch('/api/gopay/clearings',{headers});
+    if(r.status===401){ ZAS_TOKEN=''; throw new Error('Neplatný APP_TOKEN.'); }
+    const data=await r.json();
+    if(!r.ok) throw new Error(data.error||('stav '+r.status));
+    GOPAY=GOPAY||{}; let ok=0,bad=0;
+    for(const c of (data.clearings||[])){
+      try{ const cl=parseGoPayClearing(c.xml); if(cl.sym){ GOPAY[cl.sym]=cl; ok++; } }catch{ bad++; }
+    }
+    $('slotGopay').classList.add('done');
+    $('gopayFn').textContent='z e-mailu ('+ok+')';
+    $('gopayNum').textContent=Object.keys(GOPAY).length+' vyúčtování';
+    if(!ok) fail('Z e-mailu nepřišlo žádné platné GoPay vyúčtování (nalezeno '+(data.count||0)+' příloh).');
+    if(MOV) render();
+  }catch(err){ fail('GoPay z e-mailu: '+err.message); }
+  finally{ btn.disabled=false; btn.textContent='Načíst GoPay z e-mailu'; }
+}
+async function initGopay(){
+  try{
+    const r=await fetch('/api/gopay/status'); const st=await r.json();
+    GOPAY_OK=!!st.configured; GOPAY_TOKEN_REQ=!!st.tokenRequired;
+    show($('gopayBtn'), GOPAY_OK);
+  }catch{ GOPAY_OK=false; }
+}
+$('gopayBtn').onclick=loadGopayFromMail;
+initGopay();
 </script>
