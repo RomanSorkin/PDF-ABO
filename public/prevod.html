@@ -168,9 +168,23 @@ function parseCzNum(s){
 }
 const NUM='(-?\\s?[\\d\\s]*\\d[.,]\\d{2})';
 function ddmmrr(d){ return String(d.d).padStart(2,'0')+String(d.m).padStart(2,'0')+String(d.y%100).padStart(2,'0'); }
-function acc16(protiucet){
-  if(!protiucet||/\*/.test(protiucet)) return '0'.repeat(16);
-  const base=protiucet.split('/')[0].replace(/\D/g,''); return base?zero(base,16):'0'.repeat(16);
+// Formát čísla účtu v GPC: 'vnitrni' (permutovaný — co čeká Pohoda) nebo 'edicni' (standardní).
+// Vnitřní permutace dle technické specifikace ABO:
+//   Ediční:  P1..P6 C1..C9C0   ->   Vnitřní: C0 C8 C9 C6 C1 C2 C3 C4 C5 C7 P1..P6
+const ABO_PERM=[15,13,14,11,6,7,8,9,10,12,0,1,2,3,4,5];
+let GPC_FORMAT='vnitrni';
+function accGpc(s){
+  if(!s || /\*/.test(String(s))) return '0'.repeat(16);   // karty apod.
+  s=String(s).split('/')[0];                              // pryč kód banky
+  let pre='', num=s;
+  if(s.includes('-')){ const p=s.split('-'); pre=p[0]; num=p[1]; }
+  pre=(pre||'').replace(/\D/g,'').padStart(6,'0').slice(-6);
+  num=(num||'').replace(/\D/g,'');
+  if(!num) return '0'.repeat(16);
+  num=num.padStart(10,'0').slice(-10);
+  const edicni=pre+num;                                   // předčíslí(6)+číslo(10)
+  if(GPC_FORMAT==='edicni') return edicni;
+  return ABO_PERM.map(i=>edicni[i]).join('');             // permutace na vnitřní tvar
 }
 const parseDate=(s)=>{const m=s.match(/(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})/);return m?{d:+m[1],m:+m[2],y:+m[3]}:null;};
 
@@ -356,7 +370,7 @@ function reconcile(H,items){
 
 /* ---------- build GPC ---------- */
 function buildGpc(H,items){
-  const acc=zero((H.account||'').replace(/\D/g,''),16);
+  const acc=accGpc(H.account||'');
   const hal=(v)=>zero(Math.round(Math.abs(v)*100),14);
   const bankName=pad(H.bank||'',14);
   const l074=()=>{
@@ -369,7 +383,7 @@ function buildGpc(H,items){
     return f.slice(0,128).padEnd(128,' ');
   };
   const l075=(t)=>{
-    let f='075'+acc+acc16(t.proti)+zero((t.kod||'').replace(/\D/g,''),13);
+    let f='075'+acc+accGpc(t.proti)+zero((t.kod||'').replace(/\D/g,''),13);
     f+=zero(Math.round(Math.abs(t.amount)*100),12)+(t.amount<0?'1':'2');
     f+=zero(t.vs||0,10)+zero(t.ks||0,10)+zero(t.ss||0,10);
     f+=ddmmrr(t.valuta||t.book)+pad(t.party||'',20)+'00203'+ddmmrr(t.book||t.valuta);
@@ -393,7 +407,12 @@ function render(H,items,rc,gpcText,fname,bank){
     fmt(Math.abs(t.amount))+'</td></tr>').join('');
   box.innerHTML=
     '<div class="recon-card '+(rc.ok?'ok':'bad')+'"><div>'+badge+'</div>'+
-      '<div class="cta"><button class="btn ok" id="dl">Stáhnout '+fname+'</button></div></div>'+
+      '<div class="cta">'+
+        '<select id="fmt" title="Formát čísla účtu" style="font:inherit;font-size:13px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel)">'+
+          '<option value="vnitrni"'+(GPC_FORMAT==='vnitrni'?' selected':'')+'>Účet: vnitřní (Pohoda)</option>'+
+          '<option value="edicni"'+(GPC_FORMAT==='edicni'?' selected':'')+'>Účet: ediční</option>'+
+        '</select>'+
+        '<button class="btn ok" id="dl">Stáhnout '+fname+'</button></div></div>'+
     '<div class="head-meta">banka <b>'+label+'</b><span class="bankchip">'+H.bank+'</span> · účet <b>'+
       (H.account||'?')+'/'+(H.bankCode||'?')+'</b> · '+(H.name||'')+' · výpis č. <b>'+(H.stmtNo??'?')+
       '</b> · '+(H.from?dd(H.from):'?')+' – '+(H.to?dd(H.to):'?')+' · <b>'+items.length+'</b> pohybů</div>'+
@@ -404,11 +423,14 @@ function render(H,items,rc,gpcText,fname,bank){
       '<div class="cell"><div class="lbl">Výdaje</div><div class="val deb">'+fmt(H.expense)+'</div></div></div>'+
     '<div class="tablewrap"><table><thead><tr><th>Datum</th><th>Protistrana</th><th class="sym">VS</th>'+
       '<th class="sym">Protiúčet</th><th class="num">Částka</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
-  $('dl').onclick=()=>{
-    const blob=new Blob([toCp1250Bytes(gpcText)],{type:'text/plain'});
+  let gpc=gpcText;
+  const download=()=>{
+    const blob=new Blob([toCp1250Bytes(gpc)],{type:'text/plain'});
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fname; a.click();
     setTimeout(()=>URL.revokeObjectURL(a.href),1000);
   };
+  $('fmt').onchange=(e)=>{ GPC_FORMAT=e.target.value; gpc=buildGpc(H,items); };
+  $('dl').onclick=download;
 }
 
 async function handle(file){
@@ -422,6 +444,9 @@ async function handle(file){
     $('debugPre').textContent=debug; show($('debugBox'),true);
     if(!items.length) throw new Error('Nenašel jsem žádné pohyby. Otevři „Rozpoznaný text" a pošli mi ho — doladím parser.');
     const rc=reconcile(H,items);
+    // Výchozí formát čísla účtu podle banky (Pohoda ho čeká per účet):
+    // Air Bank → vnitřní, Raiffeisen → ediční. V UI jde přepnout.
+    GPC_FORMAT = (bank==='raiffeisen') ? 'edicni' : 'vnitrni';
     const period=H.to?H.to.y+'_'+String(H.to.m).padStart(2,'0'):'vypis';
     const fname='Vypis_'+(H.account||'ucet').replace(/\D/g,'')+'_'+period+'.gpc';
     const gpcText=buildGpc(H,items);
