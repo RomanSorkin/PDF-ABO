@@ -444,7 +444,7 @@ $('filter').querySelectorAll('button').forEach(b=>b.onclick=()=>{
 });
 
 /* ================= Zásilkovna API (přes backend proxy) ================= */
-let ZAS_OK=false, ZAS_TOKEN_REQ=false, ZAS_TOKEN='';
+let ZAS_OK=false, ZAS_TOKEN_REQ=false, ZAS_TOKEN='', ZAS_ACCOUNTS=[];
 const isZas=(party)=>/z[aá]silkov|packeta/i.test(party||'');
 
 async function zasApi(path, params){
@@ -481,22 +481,26 @@ function zasOrderCol(header, rows, dataRows){
 
 // zkus rozpad: nejdřív podle čísla, pak podle var_symbolu (pohoda formát)
 async function resolveZas(vs){
-  for(const attempt of [{path:'/api/zasilkovna/packet',p:{number:vs,version:5,lang:'cs'}},
-                        {path:'/api/zasilkovna/packet-pohoda',p:{var_symbol:vs,lang:'cs'}}]){
-    try{
-      const r=await zasApi(attempt.path, attempt.p);
-      if(r.status===401){ ZAS_TOKEN=''; throw new Error('401'); }
-      if(!r.ok) continue;
-      const rows=zasCsv(zasDecode(await r.arrayBuffer()));
-      if(rows.length){
-        const header=zasHeaderRow(rows);
-        const head=header?rows[0]:rows[0].map((_,i)=>'sl. '+(i+1));
-        const data=header?rows.slice(1):rows;
-        if(!data.length) continue;
-        const orderCol=zasOrderCol(header?rows[0]:null, rows, data);
-        return {header:head, rows:data, count:data.length, orderCol};
-      }
-    }catch(e){ if(e.message==='401') throw e; }
+  const accts = ZAS_ACCOUNTS.length ? ZAS_ACCOUNTS : [''];
+  for(const acc of accts){
+    for(const attempt of [{path:'/api/zasilkovna/packet',p:{number:vs,version:5,lang:'cs'}},
+                          {path:'/api/zasilkovna/packet-pohoda',p:{var_symbol:vs,lang:'cs'}}]){
+      try{
+        const params = acc ? Object.assign({account:acc}, attempt.p) : attempt.p;
+        const r=await zasApi(attempt.path, params);
+        if(r.status===401){ ZAS_TOKEN=''; throw new Error('401'); }
+        if(!r.ok) continue;
+        const rows=zasCsv(zasDecode(await r.arrayBuffer()));
+        if(rows.length){
+          const header=zasHeaderRow(rows);
+          const head=header?rows[0]:rows[0].map((_,i)=>'sl. '+(i+1));
+          const data=header?rows.slice(1):rows;
+          if(!data.length) continue;
+          const orderCol=zasOrderCol(header?rows[0]:null, rows, data);
+          return {header:head, rows:data, count:data.length, orderCol, account:acc};
+        }
+      }catch(e){ if(e.message==='401') throw e; }
+    }
   }
   return null;
 }
@@ -529,6 +533,7 @@ async function initZas(){
   try{
     const r=await fetch('/api/zasilkovna/status'); const st=await r.json();
     ZAS_OK=!!st.configured; ZAS_TOKEN_REQ=!!st.tokenRequired;
+    ZAS_ACCOUNTS=(st.accounts||[]).map(a=>a.id);
     show($('zasBtn'), ZAS_OK);
   }catch{ ZAS_OK=false; }
 }

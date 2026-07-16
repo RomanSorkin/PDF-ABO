@@ -113,6 +113,8 @@
 
   <div id="app" class="hidden">
     <div class="controls">
+      <div class="fld" id="acctFld" style="display:none"><label>Účet Zásilkovny</label>
+        <select id="acct"></select></div>
       <div class="fld"><label>Faktury od</label><input type="date" id="from"></div>
       <div class="fld"><label>do</label><input type="date" id="to"></div>
       <button class="btn primary" id="loadBtn">Načíst faktury</button>
@@ -158,11 +160,12 @@ if (window.pdfjsLib) {
 <script>
 const $=(id)=>document.getElementById(id);
 const show=(el,on)=>el.classList.toggle('hidden',!on);
-let TOKEN='', TOKEN_REQUIRED=false;
+let TOKEN='', TOKEN_REQUIRED=false, ACCOUNT='';
 
-/* ---------- API helper (adds token header, never puts secrets in URL) ---------- */
+/* ---------- API helper (adds token header + selected account, never puts secrets in URL) ---------- */
 async function api(path, params){
   const u=new URL(path, location.origin);
+  if(ACCOUNT) u.searchParams.set('account', ACCOUNT);
   for(const k in params){ const v=params[k]; if(v!=null&&v!=='') u.searchParams.set(k,v); }
   const headers={};
   if(TOKEN) headers['x-app-token']=TOKEN;
@@ -555,6 +558,16 @@ async function init(){
     const r=await fetch('/api/zasilkovna/status'); const st=await r.json();
     TOKEN_REQUIRED=!!st.tokenRequired;
     if(!st.configured){ show($('setup'),true); return; }
+    // účty Zásilkovny
+    const accts=st.accounts||[];
+    if(accts.length){
+      ACCOUNT=accts[0].id;
+      const sel=$('acct');
+      sel.innerHTML=accts.map(a=>'<option value="'+a.id+'">'+esc(a.label)+'</option>').join('');
+      sel.value=ACCOUNT;
+      sel.onchange=()=>{ ACCOUNT=sel.value; if(!$('app').classList.contains('hidden')) loadInvoices(); };
+      $('acctFld').style.display = accts.length>1 ? '' : 'none';   // přepínač jen když je účtů víc
+    }
     if(TOKEN_REQUIRED){ show($('tokenCard'),true); }
     else { show($('app'),true); }
   }catch{ show($('setup'),true); }
