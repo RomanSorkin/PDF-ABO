@@ -11,10 +11,24 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(__dirname, 'public');
 const PORT = process.env.PORT || 3000;
 
-// --- Zásilkovna / Packeta credentials (set these in Railway → Variables) ---
+// --- Zásilkovna / Packeta účty (nastav v Railway → Variables) ---
+// Účet 1 (stávající, zpětně kompatibilní): ZASILKOVNA_KEY / ZASILKOVNA_PASSWORD / ZASILKOVNA_LABEL
+// Účet 2..9: ZASILKOVNA_KEY_2 / ZASILKOVNA_PASSWORD_2 / ZASILKOVNA_LABEL_2, atd.
 const ZAS_BASE = 'https://www.zasilkovna.cz/api';
-const ZAS_KEY = (process.env.ZASILKOVNA_KEY || '').trim();
-const ZAS_PW  = (process.env.ZASILKOVNA_PASSWORD || '').trim();
+function loadZasAccounts() {
+  const a = [];
+  const k1 = (process.env.ZASILKOVNA_KEY || '').trim();
+  const p1 = (process.env.ZASILKOVNA_PASSWORD || '').trim();
+  if (k1 && p1) a.push({ id: '1', label: (process.env.ZASILKOVNA_LABEL || 'Lovci Much').trim(), key: k1, pw: p1 });
+  for (let i = 2; i <= 9; i++) {
+    const k = (process.env['ZASILKOVNA_KEY_' + i] || '').trim();
+    const p = (process.env['ZASILKOVNA_PASSWORD_' + i] || '').trim();
+    if (k && p) a.push({ id: String(i), label: (process.env['ZASILKOVNA_LABEL_' + i] || ('Účet ' + i)).trim(), key: k, pw: p });
+  }
+  return a;
+}
+const ZAS_ACCOUNTS = loadZasAccounts();
+const zasAccount = (id) => ZAS_ACCOUNTS.find(a => a.id === String(id)) || ZAS_ACCOUNTS[0];
 // Optional access gate: if APP_TOKEN is set, /api/zasilkovna/* requires the
 // matching token in the x-app-token header. If unset, the endpoints are open.
 const APP_TOKEN = process.env.APP_TOKEN || '';
@@ -26,7 +40,7 @@ const GMAIL_MCP_ACCOUNT = (process.env.GMAIL_MCP_ACCOUNT || 'varjag.claude@gmail
 const GMAIL_MCP_QUERY = (process.env.GMAIL_MCP_QUERY || 'GoPay vyúčtování').trim();
 const gmailConfigured = () => Boolean(GMAIL_MCP_URL);
 
-const zasConfigured = () => Boolean(ZAS_KEY && ZAS_PW);
+const zasConfigured = () => ZAS_ACCOUNTS.length > 0;
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -42,9 +56,10 @@ const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': 
 async function proxyZasilkovna(subpath, allowed, url, res) {
   if (!zasConfigured())
     return send(res, 503, JSONT, JSON.stringify({ error: 'Zásilkovna API není nakonfigurováno (chybí ZASILKOVNA_KEY / ZASILKOVNA_PASSWORD).' }));
+  const acct = zasAccount(url.searchParams.get('account'));   // 'account' se NEposílá do Zásilkovny (není v allowed)
   const target = new URL(ZAS_BASE + subpath);
-  target.searchParams.set('key', ZAS_KEY);
-  target.searchParams.set('password', ZAS_PW);
+  target.searchParams.set('key', acct.key);
+  target.searchParams.set('password', acct.pw);
   for (const p of allowed) {
     const v = url.searchParams.get(p);
     if (v != null && v !== '') target.searchParams.set(p, v);
@@ -155,15 +170,17 @@ const server = http.createServer(async (req, res) => {
   // a swapped key/password or stray whitespace. Gated by token when APP_TOKEN is set.
   if (path === '/api/zasilkovna/status') {
     const authed = !APP_TOKEN || req.headers['x-app-token'] === APP_TOKEN;
-    const body = { configured: zasConfigured(), tokenRequired: Boolean(APP_TOKEN) };
-    if (authed) {
-      body.keyLength = ZAS_KEY.length;
-      body.passwordLength = ZAS_PW.length;
-      body.keyLooksHex = /^[0-9a-f]+$/i.test(ZAS_KEY);
-      body.passwordLooksHex = /^[0-9a-f]+$/i.test(ZAS_PW);
-      body.keyEqualsPassword = Boolean(ZAS_KEY) && ZAS_KEY === ZAS_PW;
-    }
-    return send(res, 200, JSONT, JSON.stringify(body));
+    const accounts = ZAS_ACCOUNTS.map(a => {
+      const o = { id: a.id, label: a.label };
+      if (authed) {
+        o.keyLength = a.key.length;
+        o.passwordLength = a.pw.length;
+        o.passwordLooksHex = /^[0-9a-f]+$/i.test(a.pw);
+        o.keyEqualsPassword = a.key === a.pw;
+      }
+      return o;
+    });
+    return send(res, 200, JSONT, JSON.stringify({ configured: zasConfigured(), tokenRequired: Boolean(APP_TOKEN), accounts }));
   }
 
   // Zásilkovna proxy routes
