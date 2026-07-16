@@ -40,14 +40,40 @@ Stránka `faktury.html` čte faktury přes backend, aby se API klíč a heslo ni
 nedostaly do prohlížeče. Nastav v Railway → Variables:
 
 ```
-ZASILKOVNA_KEY       = API klíč   (Klientská sekce → Zákaznická podpora)
-ZASILKOVNA_PASSWORD  = API heslo
+ZASILKOVNA_KEY       = API klíč účtu 1   (Klientská sekce → Zákaznická podpora)
+ZASILKOVNA_PASSWORD  = API heslo účtu 1
+ZASILKOVNA_LABEL     = (volitelné) název účtu 1, výchozí "Lovci Much"
 APP_TOKEN            = (volitelné) tajný řetězec; když je nastavený,
                        /api/zasilkovna/* vyžaduje hlavičku x-app-token
 ```
 
+Více účtů Zásilkovny — přidej druhý (a další) přes číslovaný sufix:
+
+```
+ZASILKOVNA_KEY_2       = API klíč účtu 2
+ZASILKOVNA_PASSWORD_2  = API heslo účtu 2
+ZASILKOVNA_LABEL_2     = Varjag Tactical
+```
+
+Endpointy berou volitelný parametr `account` (id účtu, výchozí první). Stránka
+Faktury nabídne přepínač účtu; párování zkusí Zásilkovnu přes všechny účty.
+
 Proxy endpointy (klíč/heslo se doplní na serveru, nikdy se nevrací ani neloguje):
 `/api/zasilkovna/status`, `/invoices`, `/packet`, `/packet-pohoda`, `/pdf`.
+
+### GoPay – automatické stažení vyúčtování z e-mailu
+
+Párovací stránka umí GoPay clearing XML natáhnout sama tlačítkem „Načíst GoPay
+z e-mailu". Backend k tomu volá tvůj **Gmail MCP server**. Nastav v Railway:
+
+```
+GMAIL_MCP_URL      = veřejná /mcp adresa tvého Gmail MCP serveru
+GMAIL_MCP_ACCOUNT  = (volitelné) schránka, výchozí varjag.claude@gmail.com
+GMAIL_MCP_QUERY    = (volitelné) hledaný dotaz, výchozí "GoPay vyúčtování"
+```
+
+Endpointy: `/api/gopay/status`, `/api/gopay/clearings` (gated přes APP_TOKEN).
+Ruční nahrání clearing XML zůstává jako záloha.
 
 ## Spuštění lokálně
 
