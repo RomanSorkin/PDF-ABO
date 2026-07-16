@@ -68,6 +68,13 @@
        font-family:var(--mono);font-size:11.5px;line-height:1.6;max-height:300px;overflow:auto;white-space:pre-wrap}
   .hidden{display:none!important}
   .muted{color:var(--muted);font-size:12.5px}
+  .bulkbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 14px;padding:10px 14px;
+       border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+  .bulkbar .spacer{flex:1}
+  .bulkinfo{font-size:13px} .bulkinfo b{color:var(--accent)}
+  .bulkbar .btn:disabled{opacity:.5;cursor:not-allowed}
+  td.chk,th.chk{width:34px;text-align:center;padding-left:10px;padding-right:6px}
+  td.chk input,th.chk input{width:16px;height:16px;cursor:pointer}
 </style>
 
 <header class="top">
@@ -114,6 +121,17 @@
     </div>
 
     <div id="errbox" class="err hidden"></div>
+
+    <div id="bulkBar" class="bulkbar hidden">
+      <span class="bulkinfo">Hromadné stažení: <b id="bulkCount">0</b></span>
+      <span class="muted" id="bulkHint">(nic nezaškrtnuto = všechny načtené)</span>
+      <div class="spacer"></div>
+      <button class="btn sm" id="bulkIsdoc">ISDOC (zip)</button>
+      <button class="btn sm" id="bulkPdf">PDF (zip)</button>
+      <button class="btn sm" id="bulkPohoda">Pohoda CSV (zip)</button>
+      <span id="bulkProg" class="muted"></span>
+    </div>
+
     <div id="listWrap" class="tablewrap hidden">
       <table>
         <thead id="thead"></thead>
@@ -129,6 +147,14 @@
   </div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+}
+</script>
 <script>
 const $=(id)=>document.getElementById(id);
 const show=(el,on)=>el.classList.toggle('hidden',!on);
@@ -202,20 +228,40 @@ function renderList(rows){
   const headRow = header ? rows[0] : rows[0].map((_,i)=>'sl. '+(i+1));
   const dataRows = header ? rows.slice(1) : rows;
   const numCol=findNumberCol(rows);
-  $('thead').innerHTML='<tr>'+headRow.map(h=>'<th>'+esc(h)+'</th>').join('')+'<th>Akce</th></tr>';
+  $('thead').innerHTML='<tr><th class="chk"><input type="checkbox" id="chkAll" title="Vybrat vše"></th>'+
+    headRow.map(h=>'<th>'+esc(h)+'</th>').join('')+'<th>Akce</th></tr>';
   $('tbody').innerHTML=dataRows.map((r,ri)=>{
     const number=numCol>=0?(r[numCol]||'').trim():'';
     const cells=r.map((c,ci)=>'<td class="'+(/^-?[\d\s.,]+$/.test(c)?'n':'')+'">'+esc(c)+'</td>').join('');
+    const cb=number?'<input type="checkbox" class="rowchk" data-num="'+number+'">':'';
     const act=number
       ? '<button class="btn sm" data-num="'+number+'" data-act="detail">Rozpad</button> '+
-        '<button class="btn sm" data-num="'+number+'" data-act="pdf">PDF</button>'
+        '<button class="btn sm" data-num="'+number+'" data-act="pdf">PDF</button> '+
+        '<button class="btn sm" data-num="'+number+'" data-act="isdoc">ISDOC</button>'
       : '<span class="muted">—</span>';
-    return '<tr data-row="'+ri+'">'+cells+'<td class="actions">'+act+'</td></tr>';
+    return '<tr data-row="'+ri+'"><td class="chk">'+cb+'</td>'+cells+'<td class="actions">'+act+'</td></tr>';
   }).join('');
   show($('listWrap'),true);
+  show($('bulkBar'),true);
   $('tbody').querySelectorAll('button[data-act]').forEach(b=>{
-    b.onclick=()=> b.dataset.act==='pdf' ? openPdf(b.dataset.num) : toggleDetail(b);
+    b.onclick=()=> b.dataset.act==='pdf' ? openPdf(b.dataset.num)
+                : b.dataset.act==='isdoc' ? makeIsdoc(b)
+                : toggleDetail(b);
   });
+  $('tbody').querySelectorAll('.rowchk').forEach(c=>c.onchange=updateBulkCount);
+  const all=$('chkAll'); if(all) all.onchange=()=>{ $('tbody').querySelectorAll('.rowchk').forEach(c=>c.checked=all.checked); updateBulkCount(); };
+  updateBulkCount();
+}
+function allNumbers(){ return [...$('tbody').querySelectorAll('.rowchk')].map(c=>c.dataset.num); }
+function selectedNumbers(){
+  const checked=[...$('tbody').querySelectorAll('.rowchk:checked')].map(c=>c.dataset.num);
+  return checked.length?checked:allNumbers();
+}
+function updateBulkCount(){
+  const checked=$('tbody').querySelectorAll('.rowchk:checked').length;
+  const total=$('tbody').querySelectorAll('.rowchk').length;
+  const cnt=$('bulkCount'); if(cnt) cnt.textContent = checked? (checked+' vybraných') : (total+' faktur');
+  const hint=$('bulkHint'); if(hint) show(hint, checked===0);
 }
 const esc=(s)=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -256,7 +302,250 @@ async function openPdf(number){
   }catch(err){ alert('PDF se nepodařilo otevřít: '+err.message); }
 }
 
-/* ---------- init: zjisti stav backendu ---------- */
+/* ================= PDF faktury Zásilkovny -> ISDOC ================= */
+const znum=(s)=>parseFloat(String(s).replace(/\u00a0/g,'').replace(/\s/g,'').replace(',','.'))||0;
+const r2=(x)=>Math.round(x*100)/100;
+const two=(x)=>x.toFixed(2);
+const xmlesc=(s)=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// pdf.js: rekonstrukce vizuálních řádků z pozic (stejně jako v převodníku)
+async function extractRows(buf){
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const out=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const items=(await page.getTextContent()).items.filter(it=>it.str&&it.str.trim().length)
+      .map(it=>({x:it.transform[4],y:it.transform[5],s:it.str}));
+    items.sort((a,b)=>b.y-a.y||a.x-b.x);
+    const rows=[]; let cur=null;
+    for(const it of items){ if(!cur||Math.abs(cur.y-it.y)>3){cur={y:it.y,toks:[]};rows.push(cur);} cur.toks.push(it); }
+    rows.forEach(r=>r.toks.sort((a,b)=>a.x-b.x));
+    rows.forEach(r=>out.push(r.toks.map(t=>t.s).join(' ').replace(/\s+/g,' ').trim()));
+  }
+  return out;
+}
+
+function parseZasInvoice(lines, number){
+  const all=lines.join('\n');
+  const find=(re,d='')=>{ const m=all.match(re); return m?m[1].trim():d; };
+  const toISO=(s)=>{ const p=(String(s).match(/\d+/g)||[]); if(p.length<3) return ''; let[d,mo,y]=p; y=+y; if(y<100)y+=2000; return y+'-'+String(+mo).padStart(2,'0')+'-'+String(+d).padStart(2,'0'); };
+  const vs=find(/Variabiln[íi] symbol\s*:?\s*(\d+)/i, number);
+  const ks=find(/Konstat?n[íi] symbol\s*:?\s*(\d+)/i,'0308');
+  const vyst=toISO(find(/Datum vystaven[íi]\s*:?\s*([\d.\s]+)/i));
+  const splat=toISO(find(/Datum splatnosti\s*:?\s*([\d.\s]+)/i));
+  const duzp=toISO(find(/Datum uskute[čc]n[ěe]n[íi][^:]*:\s*([\d.\s]+)/i))||vyst;
+  const SRE=/^(.+?)\s+([\d.,]+)(?:\s*ks)?\s+([\d\s.,]+?)\s+(\d+[.,]?\d*)\s*%\s+([\d\s.,]+?)\s*CZK\s*$/;
+  const isSvc=(t)=>{ const mm=t.match(SRE); return !!mm && !/Celkem|DPH|Fakturovan|Množstv|Základ/i.test(mm[1]); };
+  const items=[];
+  for(let idx=0; idx<lines.length; idx++){
+    const m=lines[idx].match(SRE);
+    if(!m) continue;
+    let name=m[1].trim();
+    if(/Celkem|DPH|Fakturovan|Množstv|Základ/i.test(name)) continue;
+    // slouč zalomený název (pokračovací řádek hned pod ním)
+    for(let j=idx+1; j<lines.length; j++){
+      const nx=lines[j];
+      if(isSvc(nx)) break;
+      if(/CZK|Celkem|Součet|Souhrn|DPH|Fakturovan|Základ|Rekapitulace|Přehled|Vybran|Bude|Daňový|Powered|Zapsáno|IBAN|Účet|symbol/i.test(nx)) break;
+      if(!/[A-Za-zÁ-ž]/.test(nx) || nx.length>40) break;
+      name+=' '+nx.trim();
+    }
+    items.push({name, qty:znum(m[2]), unit:znum(m[3]), rate:znum(m[4]), total:znum(m[5])});
+  }
+  const incl=znum(find(/Fakturovan[áa] [čc][áa]stka v[čc]etn[ěe] DPH\s+([\d\s.,]+)\s*CZK/i));
+  return {number, vs, ks, vyst, splat, duzp, items, incl};
+}
+
+function isdocLine(it){
+  const vat=r2(it.total*it.rate/100), incl=r2(it.total+vat);
+  const code=/Doprav/i.test(it.name)?'DOPRAVNE':/doběreč|dobireč|doberec/i.test(it.name)?'DOBERECNE':/Mýt|Myt/i.test(it.name)?'MYTNE':/Paliv/i.test(it.name)?'PALIVO':'SLUZBA';
+  return `    <InvoiceLine>
+      <ID>${crypto.randomUUID()}</ID>
+      <InvoicedQuantity unitCode="ks">${it.qty===Math.round(it.qty)?it.qty:it.qty}</InvoicedQuantity>
+      <LineExtensionAmount>${two(it.total)}</LineExtensionAmount>
+      <LineExtensionAmountTaxInclusive>${two(incl)}</LineExtensionAmountTaxInclusive>
+      <LineExtensionTaxAmount>${two(vat)}</LineExtensionTaxAmount>
+      <UnitPrice>${two(it.unit)}</UnitPrice>
+      <UnitPriceTaxInclusive>${two(r2(it.unit*(1+it.rate/100)))}</UnitPriceTaxInclusive>
+      <ClassifiedTaxCategory>
+        <Percent>${Math.round(it.rate)}</Percent>
+        <VATCalculationMethod>0</VATCalculationMethod>
+        <VATApplicable>true</VATApplicable>
+      </ClassifiedTaxCategory>
+      <Item>
+        <Description>${xmlesc(it.name)}</Description>
+        <SellersItemIdentification><ID>${code}</ID></SellersItemIdentification>
+      </Item>
+    </InvoiceLine>`;
+}
+
+function buildIsdoc(inv){
+  const base=r2(inv.items.reduce((a,i)=>a+i.total,0));
+  const vat=r2(inv.items.reduce((a,i)=>a+r2(i.total*i.rate/100),0));
+  const incl=r2(base+vat);
+  const SUP={ico:'28408306',dic:'CZ28408306',nazev:'Zásilkovna s.r.o.',ulice:'Českomoravská',cp:'2408/1a',mesto:'Praha',psc:'19000',tel:'+420 216 216 516',ucet:'2534330302',banka:'2600',nazevBanky:'Citibank Europe plc',iban:'CZ7726000000002534330302',bic:'CITICZPX',or:'Zapsáno v obchodním rejstříku vedeném u Městského soudu v Praze v oddílu C, vložce číslo 139387.'};
+  const CUS={ico:'09778268',dic:'CZ8211079943',nazev:'Ing. Roman Sorkin',ulice:'Na Vyhlídce 2259',mesto:'Petřvald',psc:'735 41'};
+  return `<?xml version="1.0" encoding="utf-8"?>
+<Invoice xmlns="http://isdoc.cz/namespace/2013" version="6.0.1">
+  <DocumentType>1</DocumentType>
+  <ID>${xmlesc(inv.number)}</ID>
+  <UUID>${crypto.randomUUID().toUpperCase()}</UUID>
+  <IssuingSystem>Zasilkovna ISDOC export</IssuingSystem>
+  <IssueDate>${inv.vyst}</IssueDate>
+  <TaxPointDate>${inv.duzp}</TaxPointDate>
+  <VATApplicable>true</VATApplicable>
+  <ElectronicPossibilityAgreementReference/>
+  <Note>Faktura za služby Zásilkovny – uhrazeno zápočtem</Note>
+  <LocalCurrencyCode>CZK</LocalCurrencyCode>
+  <CurrRate>1</CurrRate>
+  <RefCurrRate>1</RefCurrRate>
+  <AccountingSupplierParty>
+    <Party>
+      <PartyIdentification><ID>${SUP.ico}</ID></PartyIdentification>
+      <PartyName><Name>${xmlesc(SUP.nazev)}</Name></PartyName>
+      <PostalAddress>
+        <StreetName>${xmlesc(SUP.ulice)}</StreetName>
+        <BuildingNumber>${SUP.cp}</BuildingNumber>
+        <CityName>${xmlesc(SUP.mesto)}</CityName>
+        <PostalZone>${SUP.psc}</PostalZone>
+        <Country><IdentificationCode>CZ</IdentificationCode><Name>Česká republika</Name></Country>
+      </PostalAddress>
+      <PartyTaxScheme><CompanyID>${SUP.dic}</CompanyID><TaxScheme>VAT</TaxScheme></PartyTaxScheme>
+      <RegisterIdentification><Preformatted>${xmlesc(SUP.or)}</Preformatted></RegisterIdentification>
+      <Contact><Telephone>${SUP.tel}</Telephone></Contact>
+    </Party>
+  </AccountingSupplierParty>
+  <AccountingCustomerParty>
+    <Party>
+      <PartyIdentification><ID>${CUS.ico}</ID></PartyIdentification>
+      <PartyName><Name>${xmlesc(CUS.nazev)}</Name></PartyName>
+      <PostalAddress>
+        <StreetName>${xmlesc(CUS.ulice)}</StreetName>
+        <BuildingNumber/>
+        <CityName>${xmlesc(CUS.mesto)}</CityName>
+        <PostalZone>${CUS.psc}</PostalZone>
+        <Country><IdentificationCode>CZ</IdentificationCode><Name>Česká republika</Name></Country>
+      </PostalAddress>
+      <PartyTaxScheme><CompanyID>${CUS.dic}</CompanyID><TaxScheme>VAT</TaxScheme></PartyTaxScheme>
+      <Contact/>
+    </Party>
+  </AccountingCustomerParty>
+  <InvoiceLines>
+${inv.items.map(isdocLine).join('\n')}
+  </InvoiceLines>
+  <TaxTotal>
+    <TaxSubTotal>
+      <TaxableAmount>${two(base)}</TaxableAmount>
+      <TaxAmount>${two(vat)}</TaxAmount>
+      <TaxInclusiveAmount>${two(incl)}</TaxInclusiveAmount>
+      <AlreadyClaimedTaxableAmount>0</AlreadyClaimedTaxableAmount>
+      <AlreadyClaimedTaxAmount>0</AlreadyClaimedTaxAmount>
+      <AlreadyClaimedTaxInclusiveAmount>0</AlreadyClaimedTaxInclusiveAmount>
+      <DifferenceTaxableAmount>${two(base)}</DifferenceTaxableAmount>
+      <DifferenceTaxAmount>${two(vat)}</DifferenceTaxAmount>
+      <DifferenceTaxInclusiveAmount>${two(incl)}</DifferenceTaxInclusiveAmount>
+      <TaxCategory><Percent>21</Percent><VATApplicable>true</VATApplicable><LocalReverseChargeFlag>false</LocalReverseChargeFlag></TaxCategory>
+    </TaxSubTotal>
+    <TaxAmount>${two(vat)}</TaxAmount>
+  </TaxTotal>
+  <LegalMonetaryTotal>
+    <TaxExclusiveAmount>${two(base)}</TaxExclusiveAmount>
+    <TaxInclusiveAmount>${two(incl)}</TaxInclusiveAmount>
+    <AlreadyClaimedTaxExclusiveAmount>0</AlreadyClaimedTaxExclusiveAmount>
+    <AlreadyClaimedTaxInclusiveAmount>0</AlreadyClaimedTaxInclusiveAmount>
+    <DifferenceTaxExclusiveAmount>${two(base)}</DifferenceTaxExclusiveAmount>
+    <DifferenceTaxInclusiveAmount>${two(incl)}</DifferenceTaxInclusiveAmount>
+    <PayableRoundingAmount>0</PayableRoundingAmount>
+    <PaidDepositsAmount>0</PaidDepositsAmount>
+    <PayableAmount>${two(incl)}</PayableAmount>
+  </LegalMonetaryTotal>
+  <PaymentMeans>
+    <Payment>
+      <PaidAmount>${two(incl)}</PaidAmount>
+      <PaymentMeansCode>42</PaymentMeansCode>
+      <Details>
+        <PaymentDueDate>${inv.splat}</PaymentDueDate>
+        <ID>${SUP.ucet}</ID>
+        <BankCode>${SUP.banka}</BankCode>
+        <Name>${xmlesc(SUP.nazevBanky)}</Name>
+        <IBAN>${SUP.iban}</IBAN>
+        <BIC>${SUP.bic}</BIC>
+        <VariableSymbol>${xmlesc(inv.vs)}</VariableSymbol>
+        <ConstantSymbol>${inv.ks}</ConstantSymbol>
+      </Details>
+    </Payment>
+  </PaymentMeans>
+</Invoice>
+`;
+}
+
+async function makeIsdoc(btn){
+  const number=btn.dataset.num;
+  btn.disabled=true; const orig=btn.textContent; btn.textContent='ISDOC…';
+  try{
+    if(!window.pdfjsLib) throw new Error('pdf.js se nenačetl');
+    const r=await api('/api/zasilkovna/pdf',{number});
+    if(!r.ok) throw new Error('PDF stav '+r.status);
+    const lines=await extractRows(await r.arrayBuffer());
+    const inv=parseZasInvoice(lines, number);
+    if(!inv.items.length) throw new Error('z PDF se nepodařilo přečíst řádky služeb — otevři PDF a pošli mi ho, doladím parser');
+    // kontrola součtu proti PDF
+    const base=r2(inv.items.reduce((a,i)=>a+i.total,0));
+    const vat=r2(inv.items.reduce((a,i)=>a+r2(i.total*i.rate/100),0));
+    if(inv.incl && Math.abs(r2(base+vat)-inv.incl)>0.02)
+      if(!confirm('Pozor: součet řádků ('+two(r2(base+vat))+') nesedí na „včetně DPH" z PDF ('+two(inv.incl)+'). Přesto stáhnout ISDOC?')) return;
+    const xml=buildIsdoc(inv);
+    const blob=new Blob([xml],{type:'application/xml'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='Faktura_'+number+'.isdoc'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+  }catch(err){ alert('ISDOC se nepodařilo vytvořit: '+err.message); }
+  finally{ btn.disabled=false; btn.textContent=orig; }
+}
+
+/* ================= hromadné stažení (ISDOC / PDF / Pohoda CSV) do ZIPu ================= */
+async function bulkDownload(kind){
+  const nums=selectedNumbers();
+  if(!nums.length){ alert('Žádné faktury k stažení.'); return; }
+  if(kind==='isdoc' && !window.pdfjsLib){ alert('pdf.js se nenačetl.'); return; }
+  if(!window.JSZip){ alert('JSZip se nenačetl (zkontroluj připojení).'); return; }
+  const btns=[$('bulkIsdoc'),$('bulkPdf'),$('bulkPohoda')];
+  btns.forEach(b=>b.disabled=true);
+  const prog=$('bulkProg');
+  const zip=new JSZip(); const errs=[]; let okCount=0;
+  for(let i=0;i<nums.length;i++){
+    const num=nums[i];
+    prog.textContent='… '+(i+1)+'/'+nums.length+' ('+num+')';
+    try{
+      if(kind==='pdf'){
+        const r=await api('/api/zasilkovna/pdf',{number:num});
+        if(!r.ok) throw 0; zip.file('Faktura_'+num+'.pdf', await r.blob()); okCount++;
+      } else if(kind==='pohoda'){
+        const r=await api('/api/zasilkovna/packet-pohoda',{number:num, lang:'cs'});
+        if(!r.ok) throw 0; zip.file('Faktura_'+num+'_pohoda.csv', await r.arrayBuffer()); okCount++;
+      } else { // isdoc
+        const r=await api('/api/zasilkovna/pdf',{number:num});
+        if(!r.ok) throw 0;
+        const inv=parseZasInvoice(await extractRows(await r.arrayBuffer()), num);
+        if(!inv.items.length) throw 0;
+        zip.file('Faktura_'+num+'.isdoc', buildIsdoc(inv)); okCount++;
+      }
+    }catch(e){ errs.push(num); }
+  }
+  if(okCount===0){ prog.textContent=''; btns.forEach(b=>b.disabled=false);
+    alert('Nepodařilo se stáhnout žádnou fakturu'+(errs.length?' ('+errs.length+' chyb)':'')+'.'); return; }
+  prog.textContent='balím zip…';
+  const blob=await zip.generateAsync({type:'blob'});
+  const tag=(($('from').value||'')+'_'+($('to').value||'')).replace(/[^0-9_]/g,'');
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='zasilkovna_'+kind+'_'+tag+'.zip'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+  prog.textContent='hotovo: '+okCount+'/'+nums.length+(errs.length?' · nepovedlo se: '+errs.join(', '):'');
+  btns.forEach(b=>b.disabled=false);
+}
+$('bulkIsdoc').onclick=()=>bulkDownload('isdoc');
+$('bulkPdf').onclick=()=>bulkDownload('pdf');
+$('bulkPohoda').onclick=()=>bulkDownload('pohoda');
+
 async function init(){
   // default date range = aktuální měsíc
   const now=new Date(), y=now.getFullYear(), m=now.getMonth();
