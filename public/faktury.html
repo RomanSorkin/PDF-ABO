@@ -129,6 +129,7 @@
       <span class="muted" id="bulkHint">(nic nezaškrtnuto = všechny načtené)</span>
       <div class="spacer"></div>
       <button class="btn sm" id="bulkIsdoc">ISDOC (zip)</button>
+      <button class="btn sm" id="bulkPohodaXml">Pohoda XML</button>
       <button class="btn sm" id="bulkPdf">PDF (zip)</button>
       <button class="btn sm" id="bulkPohoda">Pohoda CSV (zip)</button>
       <span id="bulkProg" class="muted"></span>
@@ -240,7 +241,8 @@ function renderList(rows){
     const act=number
       ? '<button class="btn sm" data-num="'+number+'" data-act="detail">Rozpad</button> '+
         '<button class="btn sm" data-num="'+number+'" data-act="pdf">PDF</button> '+
-        '<button class="btn sm" data-num="'+number+'" data-act="isdoc">ISDOC</button>'
+        '<button class="btn sm" data-num="'+number+'" data-act="isdoc">ISDOC</button> '+
+        '<button class="btn sm" data-num="'+number+'" data-act="pohodaxml">Pohoda</button>'
       : '<span class="muted">—</span>';
     return '<tr data-row="'+ri+'"><td class="chk">'+cb+'</td>'+cells+'<td class="actions">'+act+'</td></tr>';
   }).join('');
@@ -249,6 +251,7 @@ function renderList(rows){
   $('tbody').querySelectorAll('button[data-act]').forEach(b=>{
     b.onclick=()=> b.dataset.act==='pdf' ? openPdf(b.dataset.num)
                 : b.dataset.act==='isdoc' ? makeIsdoc(b)
+                : b.dataset.act==='pohodaxml' ? makePohodaXml(b)
                 : toggleDetail(b);
   });
   $('tbody').querySelectorAll('.rowchk').forEach(c=>c.onchange=updateBulkCount);
@@ -356,7 +359,12 @@ function parseZasInvoice(lines, number){
     items.push({name, qty:znum(m[2]), unit:znum(m[3]), rate:znum(m[4]), total:znum(m[5])});
   }
   const incl=znum(find(/Fakturovan[áa] [čc][áa]stka v[čc]etn[ěe] DPH\s+([\d\s.,]+)\s*CZK/i));
-  return {number, vs, ks, vyst, splat, duzp, items, incl};
+  // IČ/DIČ odběratele = ta hodnota, která NENÍ Zásilkovny (28408306) — kvůli více účtům/firmám
+  const icos=[...all.matchAll(/I[ČC]\s*:?\s*(\d{6,9})/gi)].map(x=>x[1]);
+  const custIco=icos.find(i=>i.replace(/^0+/,'')!=='28408306')||'';
+  const dics=[...all.matchAll(/DI[ČC]\s*:?\s*(CZ\d+)/gi)].map(x=>x[1]);
+  const custDic=dics.find(d=>d!=='CZ28408306')||'';
+  return {number, vs, ks, vyst, splat, duzp, items, incl, custIco, custDic};
 }
 
 function isdocLine(it){
@@ -482,6 +490,93 @@ ${inv.items.map(isdocLine).join('\n')}
 `;
 }
 
+/* ================= Pohoda XML (nativní import přijaté faktury) ================= */
+// Předkontace a členění DPH dle vzoru dokladbot – podle potřeby uprav.
+const POH_PREDKONTACE='518služby', POH_CLENENI='PD';
+const gnum=(x)=>(+(Math.round(x*100)/100)).toString();   // 684 / 872.3 / 143.64 (bez koncových nul)
+// Pohoda XML NEpodporuje UTF-8 → soubor musí být ve Windows-1250 (dle XSD a dokumentace Stormware).
+const CP1250=(()=>{ const d=new TextDecoder('windows-1250'),m={}; for(let b=0;b<256;b++) m[d.decode(new Uint8Array([b]))]=b; return m; })();
+function toCp1250Bytes(str){ const out=new Uint8Array(str.length); for(let i=0;i<str.length;i++) out[i]=CP1250[str[i]] ?? 0x3F; return out; }
+const pohodaBlob=(xml)=>new Blob([toCp1250Bytes(xml)],{type:'application/xml'});
+
+function pohodaInvoiceItem(inv){
+  const items=inv.items.map(it=>{
+    const vat=r2(it.total*it.rate/100);
+    return `        <inv:invoiceItem>
+          <inv:text>${xmlesc(it.name)}</inv:text>
+          <inv:quantity>1</inv:quantity>
+          <inv:unit>ks</inv:unit>
+          <inv:payVAT>false</inv:payVAT>
+          <inv:rateVAT>high</inv:rateVAT>
+          <inv:homeCurrency>
+            <typ:unitPrice>${gnum(it.total)}</typ:unitPrice>
+            <typ:price>${gnum(it.total)}</typ:price>
+            <typ:priceVAT>${gnum(vat)}</typ:priceVAT>
+          </inv:homeCurrency>
+          <inv:accounting><typ:ids>${POH_PREDKONTACE}</typ:ids></inv:accounting>
+          <inv:classificationVAT><typ:ids>${POH_CLENENI}</typ:ids></inv:classificationVAT>
+        </inv:invoiceItem>`;
+  }).join('\n');
+  return `  <dat:dataPackItem id="ZAS-${xmlesc(inv.number)}" version="2.0">
+    <inv:invoice version="2.0">
+      <inv:invoiceHeader>
+        <inv:invoiceType>receivedInvoice</inv:invoiceType>
+        <inv:symVar>${xmlesc(inv.vs)}</inv:symVar>
+        <inv:originalDocument>${xmlesc(inv.number)}</inv:originalDocument>
+        <inv:date>${inv.vyst}</inv:date>
+        <inv:dateTax>${inv.duzp}</inv:dateTax>
+        <inv:dateAccounting>${inv.vyst}</inv:dateAccounting>
+        <inv:dateKHDPH>${inv.duzp}</inv:dateKHDPH>
+        <inv:dateDue>${inv.splat}</inv:dateDue>
+        <inv:accounting><typ:ids>${POH_PREDKONTACE}</typ:ids></inv:accounting>
+        <inv:classificationVAT><typ:ids>${POH_CLENENI}</typ:ids></inv:classificationVAT>
+        <inv:text>Zásilkovna s.r.o.</inv:text>
+        <inv:partnerIdentity>
+          <typ:address>
+            <typ:company>Zásilkovna s.r.o.</typ:company>
+            <typ:ico>28408306</typ:ico>
+            <typ:dic>CZ28408306</typ:dic>
+            <typ:street>Českomoravská 2408/1a</typ:street>
+            <typ:city>Praha</typ:city>
+            <typ:zip>19000</typ:zip>
+            <typ:country><typ:ids>CZ</typ:ids></typ:country>
+          </typ:address>
+        </inv:partnerIdentity>
+        <inv:paymentType><typ:ids>Příkazem</typ:ids></inv:paymentType>
+        <inv:note>Faktura za služby Zásilkovny – uhrazeno zápočtem</inv:note>
+      </inv:invoiceHeader>
+      <inv:invoiceDetail>
+${items}
+      </inv:invoiceDetail>
+    </inv:invoice>
+  </dat:dataPackItem>`;
+}
+function pohodaDataPack(ico, itemsXml, id){
+  return `<?xml version="1.0" encoding="Windows-1250"?>
+<dat:dataPack xmlns:dat="http://www.stormware.cz/schema/version_2/data.xsd" xmlns:inv="http://www.stormware.cz/schema/version_2/invoice.xsd" xmlns:typ="http://www.stormware.cz/schema/version_2/type.xsd" id="${xmlesc(id)}" ico="${xmlesc(ico||'')}" application="abo-gpc-viewer" version="2.0" note="Faktury Zásilkovny -> Pohoda">
+${itemsXml}
+</dat:dataPack>
+`;
+}
+function buildPohodaXml(inv){ return pohodaDataPack(inv.custIco, pohodaInvoiceItem(inv), 'ZAS-'+inv.number); }
+
+async function makePohodaXml(btn){
+  const number=btn.dataset.num;
+  btn.disabled=true; const orig=btn.textContent; btn.textContent='Pohoda…';
+  try{
+    if(!window.pdfjsLib) throw new Error('pdf.js se nenačetl');
+    const r=await api('/api/zasilkovna/pdf',{number});
+    if(!r.ok) throw new Error('PDF stav '+r.status);
+    const inv=parseZasInvoice(await extractRows(await r.arrayBuffer()), number);
+    if(!inv.items.length) throw new Error('z PDF se nepodařilo přečíst řádky služeb');
+    const xml=buildPohodaXml(inv);
+    const blob=pohodaBlob(xml);
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='pohoda-import-'+number+'.xml'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+  }catch(err){ alert('Pohoda XML se nepodařilo vytvořit: '+err.message); }
+  finally{ btn.disabled=false; btn.textContent=orig; }
+}
+
 async function makeIsdoc(btn){
   const number=btn.dataset.num;
   btn.disabled=true; const orig=btn.textContent; btn.textContent='ISDOC…';
@@ -509,12 +604,15 @@ async function makeIsdoc(btn){
 async function bulkDownload(kind){
   const nums=selectedNumbers();
   if(!nums.length){ alert('Žádné faktury k stažení.'); return; }
-  if(kind==='isdoc' && !window.pdfjsLib){ alert('pdf.js se nenačetl.'); return; }
-  if(!window.JSZip){ alert('JSZip se nenačetl (zkontroluj připojení).'); return; }
-  const btns=[$('bulkIsdoc'),$('bulkPdf'),$('bulkPohoda')];
+  const needsPdfjs = (kind==='isdoc'||kind==='pohodaxml');
+  if(needsPdfjs && !window.pdfjsLib){ alert('pdf.js se nenačetl.'); return; }
+  if(kind!=='pohodaxml' && !window.JSZip){ alert('JSZip se nenačetl (zkontroluj připojení).'); return; }
+  const btns=[$('bulkIsdoc'),$('bulkPohodaXml'),$('bulkPdf'),$('bulkPohoda')];
   btns.forEach(b=>b.disabled=true);
   const prog=$('bulkProg');
-  const zip=new JSZip(); const errs=[]; let okCount=0;
+  const zip = kind==='pohodaxml' ? null : new JSZip();
+  const pohodaItems=[]; let pohodaIco='';
+  const errs=[]; let okCount=0;
   for(let i=0;i<nums.length;i++){
     const num=nums[i];
     prog.textContent='… '+(i+1)+'/'+nums.length+' ('+num+')';
@@ -525,27 +623,37 @@ async function bulkDownload(kind){
       } else if(kind==='pohoda'){
         const r=await api('/api/zasilkovna/packet-pohoda',{number:num, lang:'cs'});
         if(!r.ok) throw 0; zip.file('Faktura_'+num+'_pohoda.csv', await r.arrayBuffer()); okCount++;
-      } else { // isdoc
+      } else { // isdoc nebo pohodaxml – čte a parsuje PDF
         const r=await api('/api/zasilkovna/pdf',{number:num});
         if(!r.ok) throw 0;
         const inv=parseZasInvoice(await extractRows(await r.arrayBuffer()), num);
         if(!inv.items.length) throw 0;
-        zip.file('Faktura_'+num+'.isdoc', buildIsdoc(inv)); okCount++;
+        if(kind==='isdoc'){ zip.file('Faktura_'+num+'.isdoc', buildIsdoc(inv)); }
+        else { pohodaItems.push(pohodaInvoiceItem(inv)); if(!pohodaIco) pohodaIco=inv.custIco; }
+        okCount++;
       }
     }catch(e){ errs.push(num); }
   }
   if(okCount===0){ prog.textContent=''; btns.forEach(b=>b.disabled=false);
     alert('Nepodařilo se stáhnout žádnou fakturu'+(errs.length?' ('+errs.length+' chyb)':'')+'.'); return; }
-  prog.textContent='balím zip…';
-  const blob=await zip.generateAsync({type:'blob'});
   const tag=(($('from').value||'')+'_'+($('to').value||'')).replace(/[^0-9_]/g,'');
-  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
-  a.download='zasilkovna_'+kind+'_'+tag+'.zip'; a.click();
+  let blob, fname;
+  if(kind==='pohodaxml'){
+    prog.textContent='skládám XML…';
+    blob=pohodaBlob(pohodaDataPack(pohodaIco, pohodaItems.join('\n'), 'ZAS-BATCH-'+tag));
+    fname='pohoda-import-'+tag+'.xml';
+  } else {
+    prog.textContent='balím zip…';
+    blob=await zip.generateAsync({type:'blob'});
+    fname='zasilkovna_'+kind+'_'+tag+'.zip';
+  }
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fname; a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),4000);
   prog.textContent='hotovo: '+okCount+'/'+nums.length+(errs.length?' · nepovedlo se: '+errs.join(', '):'');
   btns.forEach(b=>b.disabled=false);
 }
 $('bulkIsdoc').onclick=()=>bulkDownload('isdoc');
+$('bulkPohodaXml').onclick=()=>bulkDownload('pohodaxml');
 $('bulkPdf').onclick=()=>bulkDownload('pdf');
 $('bulkPohoda').onclick=()=>bulkDownload('pohoda');
 
