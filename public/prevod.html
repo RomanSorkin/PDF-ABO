@@ -234,40 +234,81 @@ function makeColumnizer(lines, headerTest, marks){
 }
 
 /* ========== RAIFFEISENBANK ========== */
-function parseRaiffeisen(lines, joined){
-  const H={bank:'RAIFFEISENBANK'};
-  const mAcc=joined.match(/Číslo účtu:\s*([\d-]+)\/(\d+)/); if(mAcc){H.account=mAcc[1];H.bankCode=mAcc[2];}
-  const mName=joined.match(/Název účtu:\s*([^\n]+)/); H.name=mName?mName[1].trim():'';
-  const mS=joined.match(/Pořadové č\.?\s*výpisu:\s*(\d+)\s*za období:\s*(\d+)\.\s*(\d+)\.\s*(\d+)\s*-\s*(\d+)\.\s*(\d+)\.\s*(\d+)/);
-  if(mS){H.stmtNo=+mS[1];H.from={d:+mS[2],m:+mS[3],y:+mS[4]};H.to={d:+mS[5],m:+mS[6],y:+mS[7]};}
-  const g=(re)=>{const m=joined.match(re);return m?parseCzNum(m[1]):NaN;};
-  H.opening=g(new RegExp('Počáteční zůstatek:\\s*'+NUM));
-  H.closing=g(new RegExp('Konečný zůstatek:\\s*'+NUM));
-  H.income =g(new RegExp('Příjmy celkem:\\s*'+NUM));
-  H.expense=g(new RegExp('Výdaje celkem:\\s*'+NUM));
+const rbRound=x=>Math.round(x*100)/100;
+function rbReconciles(H, items){
+  if(!items.length) return false;
+  const inc=rbRound(items.filter(t=>t.amount>0).reduce((a,t)=>a+t.amount,0));
+  const exp=rbRound(items.filter(t=>t.amount<0).reduce((a,t)=>a-t.amount,0));
+  return !isNaN(H.income)&&rbRound(H.income)===inc && !isNaN(H.expense)&&rbRound(H.expense)===exp
+      && !isNaN(H.opening)&&!isNaN(H.closing)&&rbRound(H.opening+inc-exp)===rbRound(H.closing);
+}
 
+// Řádkový parser (jako Air Bank/ČS) — robustní na cizí měny; částka ve striktním tvaru (1-3 číslice + skupiny po 3), ať se neslepí s VS.
+function rbLine(lines, H){
+  const CUR=H.currency||'CZK';
+  const raw=lines.map(l=>l.text.trim()).filter(Boolean);
+  const reStart=new RegExp('^(\\d{1,2}\\.\\s*\\d{1,2}\\.\\s*\\d{4})\\s+(.+?)\\s+([+-]?\\d{1,3}(?:[ \\u00a0]\\d{3})*[.,]\\d{2})\\s*'+CUR+'\\s*$');
+  const STOP=/^Zpráva pro klienta|^Vklad na tomto|^Strana\b|^Raiffeisenbank a\.s\.|^Výpis pohybů|^Datum\b|^Valuta\b|^Kód transakce|^Přehled$|^Počáteční zůstatek|^Příjmy celkem|^Výdaje celkem|^Konečný zůstatek|^Pohledávky|^Poplatky celkem/;
+  const blocks=[]; let cur=null;
+  for(const ln of raw){
+    const mSt=ln.match(reStart);
+    if(mSt){ if(cur)blocks.push(cur); cur={date:mSt[1], mid:mSt[2].trim(), amt:mSt[3], rest:[]}; continue; }
+    if(STOP.test(ln)){ if(cur){blocks.push(cur);cur=null;} continue; }
+    if(cur) cur.rest.push(ln);
+  }
+  if(cur)blocks.push(cur);
+  return blocks.map(b=>{
+    const amount=parseCzNum(b.amt);
+    const restJoined=b.rest.join(' ');
+    const block=[b.mid,...b.rest].join(' ');
+    const kod=(b.rest.map(l=>(l.match(/^(\d{9,10})\b/)||[])[1]).find(Boolean))||(block.match(/\b(9\d{8,9})\b/)||[])[1]||'';
+    const proti=(block.match(/\b((?:\d{1,6}-)?\d{4,10})\s*\/\s*(\d{4})\b/)||[]).slice(1).join('/')||'';
+    const protiNum=proti?proti.split('/')[0].replace(/\D/g,''):'\u0000';
+    const ks=(block.match(/KS:?\s*(\d{3,4})/)||[])[1]||'';
+    const ss=(block.match(/SS:?\s*(\d{3,})/)||[])[1]||'';
+    const acc=(''+(H.account||'')).replace(/\D/g,'');
+    const vs=((block.match(/VS:?\s*(\d{4,10})/)||[])[1])
+             || ((block.match(/\b\d{6,10}\b/g)||[]).filter(n=>n!==kod&&n!==protiNum&&n!==acc)[0]) || '';
+    const valutaDate=(restJoined.match(/\d{1,2}\.\s*\d{1,2}\.\s*\d{4}/)||[])[0];
+    const card=/kartou/i.test(b.mid)||ks==='1178';
+    const konv=/Konverze|směnárna/i.test(b.mid);
+    let party='';
+    if(konv) party='RB smenarna';
+    else if(card){
+      const note=b.rest.find(l=>/;|EQUIPMENT|\.com|\.cz|\.nl|\.eu|SUBSCR/i.test(l))||'';
+      party=note.replace(/PK:.*?5798/i,'').split(';')[0].replace(/\s+/g,' ').trim();
+    } else {
+      const nameLine=b.rest.find(l=>/[A-Za-zÁ-ž]/.test(l)&&!/^KS:|^PK:|INVOICE|SEPA|úhrada|Zpráva|Poznámka/i.test(l)&&!/^\d/.test(l))||'';
+      party=nameLine.replace(/\s+/g,' ').trim();
+    }
+    if(!party) party=b.mid.replace(/Platba kartou|Platba na internetu[^]*|Platba|Konverze|Zahraniční platba|Odchozí[^]*|Příchozí[^]*|Jednorázová úhrada|Trvalý příkaz|Poplatek|Úrok|RB směnárna/gi,'').replace(/[\d].*/,'').replace(/\s+/g,' ').trim();
+    if(!party) party=b.mid.split(/\s+/).slice(0,3).join(' ');
+    if(party.length>40) party=party.slice(0,40);
+    return {book:parseDate(b.date), valuta:valutaDate?parseDate(valutaDate):parseDate(b.date), kod, proti, party:deacc(party), vs, ks, ss, amount};
+  }).filter(t=>!isNaN(t.amount));
+}
+
+// Původní sloupcový parser (spolehlivý na CZK) — fallback.
+function rbCols(lines, joined, H){
   const {x:c}=makeColumnizer(lines,
     t=>/Kategorie transakce/.test(t)&&/Typ transakce/.test(t),
     {kat:/Kategorie/, typ:/Typ/, vs:/^VS$/, pop:/Poplatek/, cast:/Částka/});
   const C={kat:150,typ:325,vs:560,pop:670,cast:800, ...c};
   const colOf=(x)=> x<(C.kat-20)?'datum': x<(C.typ-20)?'kat': x<(C.vs-20)?'typ': x<(C.pop-20)?'vs': x<(C.cast-40)?'pop':'cast';
-
   const data=lines.filter(l=>!/^Strana\s/.test(l.text)&&!/Raiffeisenbank a\.s\./.test(l.text)
     &&!/Datum\s+Kategorie/.test(l.text)&&!/Valuta\s+Číslo/.test(l.text)&&!/Kód transakce/.test(l.text));
   const cells=data.map(l=>{const o={datum:[],kat:[],typ:[],vs:[],cast:[]};
     l.toks.forEach(t=>{const k=colOf(t.x); if(o[k]) o[k].push(t.s);}); const r={};
     for(const k in o) r[k]=o[k].join(' ').trim(); return r;});
-
   const isDate=(s)=>/^\d{1,2}\.\s*\d{1,2}\.\s*\d{4}$/.test(s.replace(/\s+/g,' ').trim());
-  const amt=new RegExp(NUM+'\\s*CZK');
+  const amt=new RegExp(NUM+'\\s*'+(H.currency||'CZK'));
   const blocks=[]; let b=null;
   for(const cell of cells){
     if(isDate(cell.datum)&&amt.test(cell.cast)){ if(b)blocks.push(b); b={datum:[],kat:[],typ:[],vs:[],cast:[]}; }
     if(!b) continue; ['datum','kat','typ','vs','cast'].forEach(k=>{if(cell[k])b[k].push(cell[k]);});
   }
   if(b)blocks.push(b);
-
-  const items=blocks.map(bl=>{
+  return blocks.map(bl=>{
     const datum=bl.datum.join(' '), kat=bl.kat.join('\n'), typ=bl.typ.join('\n'),
           vsCol=bl.vs.join(' '), castCol=bl.cast.join(' ');
     const dates=(datum.match(/\d{1,2}\.\s*\d{1,2}\.\s*\d{4}/g)||[]).map(parseDate);
@@ -288,7 +329,27 @@ function parseRaiffeisen(lines, joined){
     else party=katName||(typ.split('\n')[0]||'').trim();
     return {book:dates[0]||null, valuta:dates[1]||dates[0]||null, kod, proti, party:deacc(party), vs, ks, ss, amount};
   }).filter(t=>t.kod && !isNaN(t.amount));
-  return {H, items};
+}
+
+function parseRaiffeisen(lines, joined){
+  const H={bank:'RAIFFEISENBANK'};
+  const mAcc=joined.match(/Číslo účtu:\s*([\d-]+)\/(\d+)/); if(mAcc){H.account=mAcc[1];H.bankCode=mAcc[2];}
+  H.currency=(joined.match(/Číslo účtu:\s*[\d-]+\/\d+\s*([A-Z]{3})/)||joined.match(/Měna účtu:\s*([A-Z]{3})/)||[])[1]||'CZK';
+  const mName=joined.match(/Název účtu:\s*([^\n]+)/); H.name=mName?mName[1].trim():'';
+  const mS=joined.match(/Pořadové č\.?\s*výpisu:\s*(\d+)\s*za období:\s*(\d+)\.\s*(\d+)\.\s*(\d+)\s*-\s*(\d+)\.\s*(\d+)\.\s*(\d+)/);
+  if(mS){H.stmtNo=+mS[1];H.from={d:+mS[2],m:+mS[3],y:+mS[4]};H.to={d:+mS[5],m:+mS[6],y:+mS[7]};}
+  const g=(re)=>{const m=joined.match(re);return m?parseCzNum(m[1]):NaN;};
+  H.opening=g(new RegExp('Počáteční zůstatek:\\s*'+NUM));
+  H.closing=g(new RegExp('Konečný zůstatek:\\s*'+NUM));
+  H.income =g(new RegExp('Příjmy celkem:\\s*'+NUM));
+  H.expense=g(new RegExp('Výdaje celkem:\\s*'+NUM));
+
+  // Zkus řádkový; když nesedí rekonciliace, spadni na sloupcový. Vrať ten, co sedí (nebo bohatší).
+  const a=rbLine(lines, H);
+  if(rbReconciles(H,a)) return {H, items:a};
+  let b=[]; try{ b=rbCols(lines, joined, H); }catch(e){}
+  if(rbReconciles(H,b)) return {H, items:b};
+  return {H, items: a.length>=b.length ? a : b};
 }
 
 /* ========== AIR BANK ========== */
