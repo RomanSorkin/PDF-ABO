@@ -260,11 +260,25 @@ function validate(f){
 }
 
 /* ---------- Pohoda XML (přijatá faktura, syntetická položka na sazbu) ---------- */
+function extractVatFromText(txt){
+  const AMT='(-?\\d[\\d \\u00a0]*[.,]\\d{2})'; const rows=[];
+  const agg={}; const re=new RegExp(AMT+'\\s+(0|10|12|15|21)\\s*%?\\s+'+AMT,'g'); let m;
+  while((m=re.exec(txt))){ const base=parseCzNum(m[1]),rate=+m[2],dph=parseCzNum(m[3]);
+    if(base>0&&Math.abs(base*rate/100-dph)<Math.max(0.5,base*0.01)){ agg[rate]=agg[rate]||{base:0,dph:0}; agg[rate].base+=base; agg[rate].dph+=dph; } }
+  for(const r in agg) rows.push({base:r2(agg[r].base),rate:+r,dph:r2(agg[r].dph)});
+  if(!rows.length){
+    const base=parseCzNum((txt.match(new RegExp('Celkem bez DPH\\s*'+AMT,'i'))||[])[1]);
+    const rate=+((txt.match(/(\d{1,2})[.,]?\d{0,2}\s*%/)||[])[1]||21);
+    if(!isNaN(base)&&base>0) rows.push({base:r2(base),rate,dph:r2(base*rate/100)});
+  }
+  return rows;
+}
 function rateVAT(r){ return r>=21?'high':(r>=12?'low':(r>0?'low':'none')); }
 function buildPohodaXml(f){
   const cleneni = f.cleneni || (f.foreign ? POH_CLENENI_ZAHR : POH_CLENENI_TUZ);
   const predk = f.predkontace || POH_PREDKONTACE;
-  const items=f.vat.map(v=>`        <inv:invoiceItem>
+  const vatRows=(f.vat||[]).filter(v=>Math.abs(v.base)>0.005||Math.abs(v.dph)>0.005);
+  const items=vatRows.map(v=>`        <inv:invoiceItem>
           <inv:text>Zdanitelné plnění ${v.rate} %</inv:text>
           <inv:quantity>1</inv:quantity>
           <inv:payVAT>false</inv:payVAT>
@@ -335,11 +349,12 @@ function fld(label,key,val,state,opts){ opts=opts||{};
 }
 function render(){
   const v=validate(F);
+  if(!F.vat||!F.vat.length) F.vat=[{base:0,rate:21,dph:0}];
   const vatRows=F.vat.map((r,i)=>`<tr>
     <td><input data-vat="${i}:base" value="${gnum(r.base)}"></td>
     <td><input data-vat="${i}:rate" value="${r.rate}" style="width:48px"></td>
     <td><input data-vat="${i}:dph" value="${gnum(r.dph)}"></td>
-    <td class="muted">${gnum(r2(r.base+r.dph))}</td></tr>`).join('')||'<tr><td colspan="4" class="muted">nenačteno — doplň ručně</td></tr>';
+    <td class="muted">${gnum(r2(r.base+r.dph))}</td></tr>`).join('');
 
   $('review').innerHTML=`
   <div id="banner"></div>
@@ -369,7 +384,13 @@ function render(){
     </div>
   </div>
   <div class="card">
-    <div class="sechead">Rekapitulace DPH</div>
+    <div class="row" style="justify-content:space-between">
+      <div class="sechead" style="margin:0">Rekapitulace DPH</div>
+      <div class="row">
+        <button class="btn pick" data-pick="__vat__" style="font-size:12px;padding:3px 8px">◎ DPH z náhledu</button>
+        <button class="btn" id="vatAdd" style="font-size:12px;padding:3px 8px">+ řádek</button>
+      </div>
+    </div>
     <table class="vat"><thead><tr><th>Základ</th><th>Sazba %</th><th>DPH</th><th>Celkem</th></tr></thead>
     <tbody>${vatRows}</tbody></table>
     <div class="row" style="justify-content:space-between;margin-top:10px">
@@ -409,13 +430,14 @@ function render(){
   $('tplFile').onchange=importTpls;
   document.querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>setActive(b.dataset.pick));
   document.querySelectorAll('.pick').forEach(b=>b.classList.toggle('on', b.dataset.pick===ACTIVE_FIELD));
+  if($('vatAdd')) $('vatAdd').onclick=()=>{ F.vat.push({base:0,rate:21,dph:0}); render(); };
 }
 function paintValidation(v){
   const b=$('banner'); if(!b) return;
   if(F.advance){ b.className='banner bad'; b.innerHTML='⚠ <b>Vyúčtování zálohy / K úhradě 0.</b> DPH bylo uplatněno na zálohové faktuře — tenhle doklad je potřeba zpracovat <b>ručně</b> (vazba na zálohovou fakturu). Auto‑generování je zablokované.'; }
   else if(v.canAuto){ b.className='banner ok'; b.innerHTML='✓ <b>Sedí.</b> Aritmetika DPH i celková částka odpovídají, datumy i IČO OK. Zkontroluj a vygeneruj.'; }
   else { b.className='banner warn'; b.innerHTML='⚠ <b>K revizi.</b> '+[
-      v.dphState!=='ok'?'DPH nesedí (základ×sazba≠DPH nebo součet≠celkem)':'',
+      (v.sumBase<0.005)?'chybí rekapitulace DPH — doplň ji („◎ DPH z náhledu" nebo ručně)':(v.dphState!=='ok'?'DPH nesedí (základ×sazba≠DPH nebo součet≠celkem)':''),
       !v.datesOk?'chybí datum':'',
       v.icoState==='bad'?'chybí IČO':'',
       Math.abs(F.total)<0.005?'nulová částka':''
@@ -501,9 +523,10 @@ function highlightField(key){
   }});
 }
 function setFieldValue(key, text){
-  if(key==='total'){ F.total=parseCzNum(text); }
+  if(key==='__vat__'){ const rows=extractVatFromText(text); if(rows.length) F.vat=rows; else alert('Z výřezu se nepodařilo přečíst DPH (potřebuju základ, sazbu a DPH). Zkus širší rámeček přes rekapitulaci, nebo doplň ručně.'); }
+  else if(key==='total'){ F.total=parseCzNum(text); }
   else { F[key]=text.trim(); if(key==='supDic') F.foreign=!!(F.supDic&&!/^CZ/.test(F.supDic)); if(key==='supIco') F.supIco=(F.supIco||'').replace(/\s/g,''); }
-  render();
+  clearActive(); render();
 }
 function initPreviewUI(){
   const ov=$('pdfOverlay'); let sx,sy,rect=null,dragging=false;
