@@ -537,8 +537,10 @@ function initPreviewUI(){
     const bx1=Math.min(sx,x),bx2=Math.max(sx,x),by1=Math.min(sy,y),by2=Math.max(sy,y);
     if(rect){rect.remove();rect=null;}
     if(bx2-bx1<4&&by2-by1<4) return;
-    const inside=PV_TOKENS.filter(t=>t.cx>=bx1&&t.cx<=bx2&&t.cy>=by1&&t.cy<=by2)
+    const hits=PV_TOKENS.filter(t=>t.cx>=bx1&&t.cx<=bx2&&t.cy>=by1&&t.cy<=by2)
       .sort((a,b)=> Math.abs(a.cy-b.cy)>6 ? a.cy-b.cy : a.cx-b.cx);
+    const inside=[];   // odstraň překryté duplicity (stejný text na skoro stejné pozici)
+    for(const t of hits){ if(inside.some(u=>u.s===t.s && Math.abs(u.cx-t.cx)<4 && Math.abs(u.cy-t.cy)<4)) continue; inside.push(t); }
     const text=inside.map(t=>t.s).join(' ').replace(/\s+/g,' ').trim();
     if(text) setFieldValue(ACTIVE_FIELD, text); else clearActive();
   };
