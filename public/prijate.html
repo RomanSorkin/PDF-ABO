@@ -44,6 +44,11 @@ table.vat input:focus{outline:1px solid var(--acc)}
 .muted{color:var(--mut)}
 .pill{font-size:12px;padding:2px 8px;border-radius:20px;border:1px solid var(--line)}
 .foot{color:var(--mut);font-size:12px;margin-top:8px}
+label .pick{display:inline-block;margin-left:5px;border:1px solid var(--line);background:#0e1016;color:var(--mut);border-radius:4px;cursor:pointer;font-size:11px;padding:0 5px;line-height:15px;vertical-align:middle}
+label .pick:hover,label .pick.on{border-color:var(--acc);color:var(--acc)}
+#pdfOverlay{cursor:crosshair}
+#selRect{position:absolute;border:1.5px solid var(--acc);background:rgba(91,140,255,.18);pointer-events:none;z-index:5}
+.tokglow{position:absolute;background:rgba(47,191,113,.16);outline:1px solid rgba(47,191,113,.55);pointer-events:none;z-index:4}
 </style>
 </head>
 <body>
@@ -68,7 +73,24 @@ table.vat input:focus{outline:1px solid var(--acc)}
     <div id="loading" class="hidden" style="margin-top:12px;color:var(--mut)">Čtu PDF…</div>
   </div>
 
-  <div id="review" class="hidden"></div>
+  <div id="workarea" class="hidden" style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
+    <div id="review" style="flex:1;min-width:320px"></div>
+    <div id="pdfPane" style="width:520px;max-width:100%;position:sticky;top:12px">
+      <div class="card" style="padding:10px">
+        <div class="row" style="justify-content:space-between;margin-bottom:8px">
+          <div class="sechead" style="margin:0">Náhled PDF</div>
+          <div class="row"><button class="btn" id="pgPrev" style="padding:4px 10px">‹</button>
+            <span id="pgInfo" class="muted"></span>
+            <button class="btn" id="pgNext" style="padding:4px 10px">›</button></div>
+        </div>
+        <div id="pickHint" class="foot" style="margin:0 0 8px;min-height:18px"></div>
+        <div id="pdfWrap" style="position:relative;overflow:auto;max-height:78vh;border:1px solid var(--line);border-radius:8px">
+          <canvas id="pdfCanvas" style="display:block"></canvas>
+          <div id="pdfOverlay" style="position:absolute;left:0;top:0"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -93,8 +115,10 @@ function isoDate(s){ const m=(s||'').match(/(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})/
 function czIcoValid(ico){ ico=String(ico||'').replace(/\D/g,''); if(!/^\d{8}$/.test(ico)) return false; const w=[8,7,6,5,4,3,2]; let s=0; for(let i=0;i<7;i++)s+=+ico[i]*w[i]; const c=(11-(s%11))%10; return c===+ico[7]; }
 
 /* ---------- PDF text ---------- */
+let PDFDOC=null;
 async function readPdf(buf){
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  PDFDOC=pdf;
   const lines=[];
   for(let p=1;p<=pdf.numPages;p++){
     const page=await pdf.getPage(p);
@@ -306,7 +330,8 @@ function bindInputs(){
 }
 function dot(state){ return `<span class="dot ${state}"></span>`; }
 function fld(label,key,val,state,opts){ opts=opts||{};
-  return `<div class="fld"><label>${label}</label><input data-f="${key}" ${opts.num?'data-num="1"':''} value="${xmlesc(val==null?'':val)}">${state?dot(state):''}</div>`;
+  const pick = opts.nopick?'':`<button class="pick" data-pick="${key}" title="Označit v PDF">◎</button>`;
+  return `<div class="fld"><label>${label}${pick}</label><input data-f="${key}" ${opts.num?'data-num="1"':''} value="${xmlesc(val==null?'':val)}">${state?dot(state):''}</div>`;
 }
 function render(){
   const v=validate(F);
@@ -374,7 +399,7 @@ function render(){
   </div>
   <div class="foot">Do hlavičky importu jde tvoje IČO ${OUR_ICO}. Kódování Windows‑1250.</div>
   `;
-  show($('review'),true);
+  show($('workarea'),true);
   bindInputs();
   paintValidation(v);
   $('aresBtn').onclick=aresLookup;
@@ -382,6 +407,8 @@ function render(){
   $('tplExport').onclick=exportTpls;
   $('tplImport').onclick=()=>$('tplFile').click();
   $('tplFile').onchange=importTpls;
+  document.querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>setActive(b.dataset.pick));
+  document.querySelectorAll('.pick').forEach(b=>b.classList.toggle('on', b.dataset.pick===ACTIVE_FIELD));
 }
 function paintValidation(v){
   const b=$('banner'); if(!b) return;
@@ -437,16 +464,79 @@ async function importTpls(e){
   finally{ e.target.value=''; }
 }
 
+/* ---------- náhled PDF + oprava kliknutím ---------- */
+let PV_PAGE=1, PV_VP=null, PV_TOKENS=[], ACTIVE_FIELD=null;
+async function renderPreview(pageNum){
+  if(!PDFDOC) return;
+  PV_PAGE=Math.max(1,Math.min(pageNum||1, PDFDOC.numPages));
+  const page=await PDFDOC.getPage(PV_PAGE);
+  const wrap=$('pdfWrap'); const targetW=Math.min(500,(wrap.clientWidth||500)-2);
+  const base=page.getViewport({scale:1});
+  const vp=page.getViewport({scale:targetW/base.width}); PV_VP=vp;
+  const canvas=$('pdfCanvas'); canvas.width=vp.width; canvas.height=vp.height;
+  const ov=$('pdfOverlay'); ov.style.width=vp.width+'px'; ov.style.height=vp.height+'px'; ov.innerHTML='';
+  await page.render({canvasContext:canvas.getContext('2d'), viewport:vp}).promise;
+  const tc=await page.getTextContent();
+  PV_TOKENS=tc.items.filter(it=>it.str&&it.str.trim()).map(it=>{
+    const x=it.transform[4], y=it.transform[5], w=it.width||0, h=it.height||10;
+    const p1=vp.convertToViewportPoint(x,y), p2=vp.convertToViewportPoint(x+w,y+h);
+    const x1=Math.min(p1[0],p2[0]), x2=Math.max(p1[0],p2[0]), y1=Math.min(p1[1],p2[1]), y2=Math.max(p1[1],p2[1]);
+    return {s:it.str, x1,y1,x2,y2, cx:(x1+x2)/2, cy:(y1+y2)/2};
+  });
+  $('pgInfo').textContent='str. '+PV_PAGE+' / '+PDFDOC.numPages;
+  if(ACTIVE_FIELD) highlightField(ACTIVE_FIELD);
+}
+function setActive(key){
+  ACTIVE_FIELD=key;
+  document.querySelectorAll('.pick').forEach(b=>b.classList.toggle('on', b.dataset.pick===key));
+  $('pickHint').innerHTML='Táhni v náhledu rámeček přes hodnotu pole <b>'+key+'</b>. (Je‑li na jiné straně, přepni ‹ ›.)';
+  highlightField(key);
+}
+function clearActive(){ ACTIVE_FIELD=null; document.querySelectorAll('.pick').forEach(b=>b.classList.remove('on')); $('pickHint').textContent=''; const ov=$('pdfOverlay'); if(ov) ov.querySelectorAll('.tokglow').forEach(e=>e.remove()); }
+function highlightField(key){
+  const ov=$('pdfOverlay'); if(!ov) return; ov.querySelectorAll('.tokglow').forEach(e=>e.remove());
+  const val=(''+((F&&F[key])||'')).replace(/\s/g,''); if(val.length<3) return;
+  PV_TOKENS.forEach(t=>{ const ts=t.s.replace(/\s/g,''); if(ts.length>=3 && val.includes(ts)){
+    const d=document.createElement('div'); d.className='tokglow'; d.style.left=t.x1+'px'; d.style.top=t.y1+'px'; d.style.width=(t.x2-t.x1)+'px'; d.style.height=(t.y2-t.y1)+'px'; ov.appendChild(d);
+  }});
+}
+function setFieldValue(key, text){
+  if(key==='total'){ F.total=parseCzNum(text); }
+  else { F[key]=text.trim(); if(key==='supDic') F.foreign=!!(F.supDic&&!/^CZ/.test(F.supDic)); if(key==='supIco') F.supIco=(F.supIco||'').replace(/\s/g,''); }
+  render();
+}
+function initPreviewUI(){
+  const ov=$('pdfOverlay'); let sx,sy,rect=null,dragging=false;
+  const pos=e=>{ const r=ov.getBoundingClientRect(); return [ (e.touches?e.touches[0].clientX:e.clientX)-r.left, (e.touches?e.touches[0].clientY:e.clientY)-r.top ]; };
+  const start=e=>{ if(!ACTIVE_FIELD) return; dragging=true; [sx,sy]=pos(e); rect=document.createElement('div'); rect.id='selRect'; ov.appendChild(rect); e.preventDefault(); };
+  const move=e=>{ if(!dragging||!rect) return; const [x,y]=pos(e); rect.style.left=Math.min(sx,x)+'px'; rect.style.top=Math.min(sy,y)+'px'; rect.style.width=Math.abs(x-sx)+'px'; rect.style.height=Math.abs(y-sy)+'px'; };
+  const end=e=>{ if(!dragging) return; dragging=false; const [x,y]=pos(e.changedTouches?{clientX:e.changedTouches[0].clientX,clientY:e.changedTouches[0].clientY}:e);
+    const bx1=Math.min(sx,x),bx2=Math.max(sx,x),by1=Math.min(sy,y),by2=Math.max(sy,y);
+    if(rect){rect.remove();rect=null;}
+    if(bx2-bx1<4&&by2-by1<4) return;
+    const inside=PV_TOKENS.filter(t=>t.cx>=bx1&&t.cx<=bx2&&t.cy>=by1&&t.cy<=by2)
+      .sort((a,b)=> Math.abs(a.cy-b.cy)>6 ? a.cy-b.cy : a.cx-b.cx);
+    const text=inside.map(t=>t.s).join(' ').replace(/\s+/g,' ').trim();
+    if(text) setFieldValue(ACTIVE_FIELD, text); else clearActive();
+  };
+  ov.addEventListener('mousedown',start); window.addEventListener('mousemove',move); window.addEventListener('mouseup',end);
+  ov.addEventListener('touchstart',start,{passive:false}); ov.addEventListener('touchmove',move,{passive:false}); ov.addEventListener('touchend',end);
+  $('pgPrev').onclick=()=>renderPreview(PV_PAGE-1);
+  $('pgNext').onclick=()=>renderPreview(PV_PAGE+1);
+}
+
 /* ---------- vstup ---------- */
 async function handleFile(file){
   if(!file) return;
-  show($('loading'),true); show($('review'),false);
+  show($('loading'),true); show($('workarea'),false);
   try{
     if(!window.pdfjsLib) throw new Error('pdf.js se nenačetl');
     const lines=await readPdf(await file.arrayBuffer());
     F=extractInvoice(lines);
     F._tpl=applyTpl(F);   // předvyplň zaúčtování ze šablony dodavatele (pokud existuje)
+    clearActive();
     render();
+    renderPreview(1);
   }catch(e){ alert('Nepodařilo se přečíst PDF: '+e.message); }
   finally{ show($('loading'),false); }
 }
@@ -456,6 +546,7 @@ $('file').onchange=e=>handleFile(e.target.files[0]);
 ['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('hover');}));
 ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('hover');}));
 drop.addEventListener('drop',e=>handleFile(e.dataTransfer.files[0]));
+initPreviewUI();
 </script>
 </body>
 </html>
