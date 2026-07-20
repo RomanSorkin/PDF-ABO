@@ -125,15 +125,16 @@ function extractInvoice(lines){
   f.foreign=!!(f.supDic && !/^CZ/.test(f.supDic));
 
   // --- název dodavatele: firma s právní formou v bloku "Dodavatel", různá od odběratele a od bank ---
-  const NAMERE=/([A-ZÁ-Ž][A-Za-zÁ-ž0-9.&\- ]{1,40}?(?:s\.\s?r\.\s?o\.|a\.\s?s\.|spol\.\s*s\s*r\.?\s*o\.|s\.p\.|v\.o\.s\.))/g;
+  const NAMERE=/([A-ZÁ-Ž][A-Za-zÁ-ž0-9.&\- ]{1,40}?(?:s\.\s?r\.\s?o\.?|a\.\s?s\.?(?=\s|,|$)|spol\.\s*s\s*r\.?\s*o\.?|s\.p\.|v\.o\.s\.))/g;
   const pickName=txt=>([...txt.matchAll(NAMERE)].map(m=>m[1].replace(/\s+/g,' ').trim())
     .filter(t=>!/Roman|Sorkin/i.test(t) && t.length>4 && !/Raiffeisen|spo[řr]iteln|Komer[čc]n[íi] banka|[ČC]SOB|Fio|Air Bank|MONETA|UniCredit|\bbanka\b/i.test(t))[0]||'');
   const di=joined.search(/Dodavatel/i);
   f.supName = (di>=0 ? pickName(joined.slice(di, di+300)) : '') || pickName(joined);
 
-  // --- číslo dokladu ---
-  f.number=(joined.match(/(?:da[ňn]ov[ýy] doklad|FAKTURA)[^\n]*?č\.?\s*(\d{5,})/i)||[])[1]
-          ||(joined.match(/FAKTURA\s+(\d{6,})/)||[])[1]||'';
+  // --- číslo dokladu (i když je "č." na dalším řádku; ne zálohová "Fa č.") ---
+  f.number=(joined.match(/(?:da[ňn]ov[ýy] doklad|FAKTURA)[\s\S]{0,25}?č\.\s*(\d{6,})/i)||[])[1]
+          ||(joined.match(/(?:da[ňn]ov[ýy] doklad|FAKTURA)\D{0,20}(\d{6,})/i)||[])[1]
+          ||(joined.match(/č\.\s*(\d{6,})/)||[])[1]||'';
   // --- VS ---
   f.vs=(joined.match(/Variabiln[íi] symbol\s*:?\s*(\d{4,})/i)||[])[1]
       ||(joined.match(/\bVS\b[^\d]{0,20}(\d{6,})/i)||[])[1]||f.number;
@@ -181,12 +182,23 @@ function extractInvoice(lines){
     const rate=+((joined.match(/(\d{1,2})[.,]?\d{0,2}\s*%/)||[])[1]||21);
     if(!isNaN(base)&&!isNaN(dph)) f.vat.push({base:r2(base),rate,dph:r2(dph)});
   }
+  if(!f.vat.length && !/Zaplacen[áa] z[áa]loha|Odpo[čc]et DPH zaplacen/i.test(joined)){
+    // bez rekapitulace: agreguj z řádků "<základ> <sazba> <DPH>" v celém textu,
+    // ale jen kde základ×sazba ≈ DPH (odfiltruje řádky položek, kde poslední číslo je cena s DPH)
+    const agg={}; const re2=new RegExp(AMT+'\\s+(0|10|12|15|21)\\s+'+AMT,'g'); let m;
+    while((m=re2.exec(joined))){ const base=parseCzNum(m[1]),rate=+m[2],dph=parseCzNum(m[3]);
+      if(base>0&&dph>=0&&Math.abs(base*rate/100-dph)<Math.max(0.5,base*0.01)){ agg[rate]=agg[rate]||{base:0,dph:0}; agg[rate].base+=base; agg[rate].dph+=dph; } }
+    for(const r in agg) f.vat.push({base:r2(agg[r].base),rate:+r,dph:r2(agg[r].dph)});
+  }
   // celková částka k úhradě
-  f.total=parseCzNum((joined.match(new RegExp('(?:CELKEM K [ÚU]HRAD[ĚE]|K [úu]hrad[ěe] celkem[^\\d]*K[čc]?|Celkem s DPH)\\s*'+AMT,'i'))||[])[1]);
+  f.total=parseCzNum((joined.match(new RegExp('(?:CELKEM K [ÚU]HRAD[ĚE]|K [úu]hrad[ěe] celkem[^\\d]*K[čc]?|Celkem s DPH|Celkem\\s*K[čc])\\s*:?\\s*'+AMT,'i'))||[])[1]);
   if(isNaN(f.total)&&f.vat.length) f.total=r2(f.vat.reduce((a,v)=>a+v.base+v.dph,0));
 
+  // splatnost může chybět (uhrazeno) → default DUZP/vystavení
+  if(!f.splat) f.splat=f.duzp||f.vyst;
+
   // --- záloha / vyúčtování (K úhradě 0) ---
-  f.advance = /Zaplacen[áa] z[áa]loha|Odpo[čc]et DPH zaplacen|zálohov[ýé]ch faktur|Ji[žz] zaplaceno|uhrazeno kartou/i.test(joined)
+  f.advance = /Zaplacen[áa] z[áa]loha|Odpo[čc]et DPH zaplacen|zálohov[ýé]ch faktur/i.test(joined)
             || (Math.abs(f.total)<0.005 && /z[áa]loh/i.test(joined));
 
   // --- zaúčtování (default; přepíše šablona dodavatele nebo ruční volba) ---
