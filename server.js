@@ -147,6 +147,34 @@ const server = http.createServer(async (req, res) => {
 
   if (path === '/healthz') return send(res, 200, JSONT, '{"ok":true}');
 
+  // ARES: obohacení dodavatele podle IČO (veřejný registr MFČR, bez klíče). Server proxy — ARES nemá CORS.
+  if (path.startsWith('/api/ares/')) {
+    const ico = (path.split('/').pop() || '').replace(/\D/g, '');
+    if (!/^\d{8}$/.test(ico)) return send(res, 400, JSONT, JSON.stringify({ error: 'IČO musí být 8 číslic.' }));
+    try {
+      const r = await fetch('https://ares.gov.cz/ekonomicke-subjekty-v-be/rest/ekonomicke-subjekty/' + ico, { headers: { Accept: 'application/json' } });
+      if (r.status === 404) return send(res, 200, JSONT, JSON.stringify({ found: false, ico }));
+      if (!r.ok) return send(res, 502, JSONT, JSON.stringify({ error: 'ARES vrátil stav ' + r.status }));
+      const d = await r.json();
+      const s = d.sidlo || {};
+      const cislo = s.cisloDomovni ? (s.cisloDomovni + (s.cisloOrientacni ? '/' + s.cisloOrientacni : '')) : '';
+      const out = {
+        found: true,
+        ico: d.ico || ico,
+        name: d.obchodniJmeno || '',
+        dic: d.dic || '',
+        street: [s.nazevUlice, cislo].filter(Boolean).join(' ') || '',
+        city: s.nazevObce || s.nazevMestskeCastiObvodu || '',
+        zip: (s.psc != null ? String(s.psc) : '').replace(/(\d{3})(\d{2})/, '$1 $2'),
+        country: (s.kodStatu && s.kodStatu !== 'CZ') ? s.kodStatu : 'CZ',
+        textAddress: s.textovaAdresa || ''
+      };
+      return send(res, 200, JSONT, JSON.stringify(out));
+    } catch (e) {
+      return send(res, 502, JSONT, JSON.stringify({ error: 'ARES nedostupný: ' + (e.message || e) }));
+    }
+  }
+
   // GoPay: stav (je nakonfigurovaný MCP most na e-mail?)
   if (path === '/api/gopay/status')
     return send(res, 200, JSONT, JSON.stringify({ configured: gmailConfigured(), tokenRequired: Boolean(APP_TOKEN), account: GMAIL_MCP_ACCOUNT }));
