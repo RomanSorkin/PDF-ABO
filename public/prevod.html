@@ -123,7 +123,7 @@
     <p>Převod proběhne celý ve tvém prohlížeči — PDF se nikam neposílá. Ze souboru se přečte hlavička
        i pohyby, ověří se, že příjmy a výdaje sedí na konečný zůstatek, a vznikne GPC (věty 074/075,
        128 znaků, kódování Windows-1250) připravený k importu do Pohody.</p>
-    <div class="banks">Rozpozná: <b>Raiffeisenbank</b> · <b>Air Bank</b> — banka se detekuje automaticky.</div>
+    <div class="banks">Rozpozná: <b>Raiffeisenbank</b> · <b>Air Bank</b> · <b>Česká spořitelna</b> — banka se detekuje automaticky.</div>
     <div class="actions">
       <button class="btn primary" id="btnOpen2">Vybrat PDF soubor</button>
     </div>
@@ -219,6 +219,7 @@ function flatten(pages){
 /* ---------- bank detection ---------- */
 function detectBank(joined){
   if(/Air Bank|AIRACZPP|airbank\.cz/i.test(joined)) return 'airbank';
+  if(/Česká spořitelna|ČESKÁ SPOŘITELNA|GIBACZPX|csas\.cz|Výpis z kartového účtu/i.test(joined)) return 'cs';
   if(/Raiffeisenbank|RZBCCZPP/i.test(joined)) return 'raiffeisen';
   return 'raiffeisen'; // default fallback
 }
@@ -348,12 +349,70 @@ function parseAirbank(lines, joined){
   return {H, items};
 }
 
+/* ========== ČESKÁ SPOŘITELNA ========== */
+function parseCS(lines, joined){
+  const H={bank:'CESKA SPORITELNA'};
+  const mAcc=joined.match(/Číslo účtu\/kód banky:\s*([\d-]+)\s*\/\s*(\d+)/); if(mAcc){H.account=mAcc[1];H.bankCode=mAcc[2];}
+  const mName=joined.match(/Majitel účtu:\s*([^\n]+)/); H.name=mName?mName[1].trim():'';
+  const mNo=joined.match(/Číslo výpisu:\s*(\d+)/); H.stmtNo=mNo?+mNo[1]:0;
+  const mP=joined.match(/Období:\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s*-\s*(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if(mP){H.from={d:+mP[1],m:+mP[2],y:+mP[3]};H.to={d:+mP[4],m:+mP[5],y:+mP[6]};}
+  const g=(re)=>{const m=joined.match(re);return m?parseCzNum(m[1]):NaN;};
+  H.opening=g(new RegExp('Počáteční zůstatek:\\s*'+NUM));
+  H.closing=g(new RegExp('Konečný zůstatek:\\s*'+NUM));
+  H.income =g(new RegExp('Celkem přišlo:\\s*'+NUM));
+  H.expense=Math.abs(g(new RegExp('Celkem odešlo:\\s*'+NUM)));
+
+  const raw=lines.map(l=>l.text.trim()).filter(Boolean);
+  const TYP='(?:Platba kartou|Příchozí úhrada|Odchozí úhrada|Příchozí platba|Odchozí platba|Výběr z bankomatu|Výběr hotovosti|Výběr|Vklad|Poplatek|Úrok|Inkaso|Trvalý příkaz|Jednorázová úhrada|Bezhotovostní [^\\d]*|Převod|SEPA[^\\d]*)';
+  const reStart=new RegExp('^(\\d{1,2}\\.\\d{1,2}\\.\\d{4})\\s+('+TYP+')\\s*(.*?)\\s*([+-]\\s?[\\d\\s]*\\d[.,]\\d{2})\\s*$');
+  const STOP=/^Konečný zůstatek|^KARTA ČÍSLO|^SLUŽBY K ÚČTU|^Počáteční zůstatek|^PŘEHLED POHYBŮ|^VAŠE PŘEDEM|^Zaúčtováno|^Provedeno|^Popis$/;
+  const blocks=[]; let cur=null;
+  for(const ln of raw){
+    const mS=ln.match(reStart);
+    if(mS){ if(cur)blocks.push(cur); cur={date:mS[1], typ:mS[2].trim(), mid:(mS[3]||'').trim(), amt:mS[4], rest:[]}; continue; }
+    if(STOP.test(ln)){ if(cur){blocks.push(cur);cur=null;} continue; }
+    if(cur) cur.rest.push(ln);
+  }
+  if(cur)blocks.push(cur);
+
+  const items=blocks.map(b=>{
+    const amount=parseCzNum(b.amt);
+    const card=/kartou/i.test(b.typ);
+    const full=[b.mid,...b.rest].join(' ');
+    const proti=(full.match(/(\d{1,6}-?\d{2,10})\s*\/\s*(\d{4})/)||[]).slice(1).join('/')||'';
+    const protiNum=proti?proti.split('/')[0].replace(/\D/g,''):'\u0000';
+    const nums=b.rest.map(l=>l.trim()).filter(l=>/^\d{2,10}$/.test(l) && l!==protiNum);
+    let vs='',ks='',ss='';
+    if(card){
+      vs=(b.mid.match(/\d{4,10}/)||[])[0]||'';
+      ks=nums.find(n=>n.length<=4)||'';
+      ss=nums.find(n=>n.length>4 && n!==vs)||'';
+    } else {
+      vs=nums.find(n=>n.length>=4)||'';
+    }
+    let party='';
+    if(card){
+      const desc=b.rest.find(l=>/[A-Za-zÁ-ž]/.test(l)&&!/^\d+$/.test(l)&&!/^CZK\b/.test(l))||'';
+      party=desc.replace(/X{4,}\w*/,'').replace(/d\.tran\.\d{1,2}\.\d{1,2}\.\d{4}/,'').replace(/\bCZ\b/,'').replace(/\s+/g,' ').trim();
+    } else {
+      const nameLine=b.rest.find(l=>/[A-Za-zÁ-ž]/.test(l)&&!STOP.test(l))||'';
+      party=nameLine.replace(/\s+/g,' ').trim();
+    }
+    if(!party) party=b.typ;
+    if(party.length>40) party=party.slice(0,40);
+    return {book:parseDate(b.date), valuta:parseDate(b.date), kod:'', proti, party:deacc(party), vs, ks, ss, amount};
+  }).filter(t=>!isNaN(t.amount));
+  return {H, items};
+}
+
 /* ---------- dispatch ---------- */
 function parseStatement(pages){
   const lines=flatten(pages);
   const joined=lines.map(l=>l.text).join('\n');
   const bank=detectBank(joined);
-  const {H,items}=(bank==='airbank'?parseAirbank:parseRaiffeisen)(lines,joined);
+  const parser = bank==='airbank'?parseAirbank : bank==='cs'?parseCS : parseRaiffeisen;
+  const {H,items}=parser(lines,joined);
   return {H, items, bank, debug:joined};
 }
 
@@ -396,7 +455,7 @@ function buildGpc(H,items){
 const fmt=(n)=>Number(n).toLocaleString('cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2});
 function render(H,items,rc,gpcText,fname,bank){
   stage(3); const box=$('result'); show(box,true);
-  const label={airbank:'Air Bank', raiffeisen:'Raiffeisenbank'}[bank]||H.bank;
+  const label={airbank:'Air Bank', raiffeisen:'Raiffeisenbank', cs:'Česká spořitelna'}[bank]||H.bank;
   const badge=rc.ok
     ? '<div class="big">✓ Sedí</div><div class="detail">Příjmy i výdaje odpovídají hlavičce a navazují na konečný zůstatek.</div>'
     : '<div class="big">✕ Nesouhlasí</div><div class="detail">příjmy '+(rc.okInc?'✓':'✕')+' ('+fmt(rc.inc)+' / '+fmt(H.income)+') · výdaje '+(rc.okExp?'✓':'✕')+' ('+fmt(rc.exp)+' / '+fmt(H.expense)+') · zůstatek '+(rc.okBal?'✓':'✕')+'<br>Zkontroluj rozpoznaný text níže — něco se nenačetlo úplně.</div>';
@@ -446,7 +505,7 @@ async function handle(file){
     const rc=reconcile(H,items);
     // Výchozí formát čísla účtu podle banky (Pohoda ho čeká per účet):
     // Air Bank → vnitřní, Raiffeisen → ediční. V UI jde přepnout.
-    GPC_FORMAT = (bank==='raiffeisen') ? 'edicni' : 'vnitrni';
+    GPC_FORMAT = (bank==='raiffeisen'||bank==='cs') ? 'edicni' : 'vnitrni';
     const period=H.to?H.to.y+'_'+String(H.to.m).padStart(2,'0'):'vypis';
     const fname='Vypis_'+(H.account||'ucet').replace(/\D/g,'')+'_'+period+'.gpc';
     const gpcText=buildGpc(H,items);
