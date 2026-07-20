@@ -242,7 +242,8 @@ function renderList(rows){
       ? '<button class="btn sm" data-num="'+number+'" data-act="detail">Rozpad</button> '+
         '<button class="btn sm" data-num="'+number+'" data-act="pdf">PDF</button> '+
         '<button class="btn sm" data-num="'+number+'" data-act="isdoc">ISDOC</button> '+
-        '<button class="btn sm" data-num="'+number+'" data-act="pohodaxml">Pohoda</button>'
+        '<button class="btn sm" data-num="'+number+'" data-act="pohodaxml">Pohoda XML</button> '+
+        '<button class="btn sm" data-num="'+number+'" data-act="pohodacsv">Pohoda CSV</button>'
       : '<span class="muted">—</span>';
     return '<tr data-row="'+ri+'"><td class="chk">'+cb+'</td>'+cells+'<td class="actions">'+act+'</td></tr>';
   }).join('');
@@ -252,6 +253,7 @@ function renderList(rows){
     b.onclick=()=> b.dataset.act==='pdf' ? openPdf(b.dataset.num)
                 : b.dataset.act==='isdoc' ? makeIsdoc(b)
                 : b.dataset.act==='pohodaxml' ? makePohodaXml(b)
+                : b.dataset.act==='pohodacsv' ? makePohodaCsv(b)
                 : toggleDetail(b);
   });
   $('tbody').querySelectorAll('.rowchk').forEach(c=>c.onchange=updateBulkCount);
@@ -574,6 +576,19 @@ async function makePohodaXml(btn){
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='pohoda-import-'+number+'.xml'; a.click();
     setTimeout(()=>URL.revokeObjectURL(a.href),3000);
   }catch(err){ alert('Pohoda XML se nepodařilo vytvořit: '+err.message); }
+  finally{ btn.disabled=false; btn.textContent=orig; }
+}
+
+async function makePohodaCsv(btn){
+  const number=btn.dataset.num;
+  btn.disabled=true; const orig=btn.textContent; btn.textContent='…';
+  try{
+    const r=await api('/api/zasilkovna/packet-pohoda',{number, lang:'cs'});
+    if(!r.ok) throw new Error('stav '+r.status);
+    const blob=new Blob([await r.arrayBuffer()],{type:'text/csv'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='Faktura_'+number+'_pohoda.csv'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+  }catch(err){ alert('Rozpis (Pohoda CSV) se nepodařilo stáhnout: '+err.message); }
   finally{ btn.disabled=false; btn.textContent=orig; }
 }
 
