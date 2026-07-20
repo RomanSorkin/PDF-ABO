@@ -1,0 +1,401 @@
+<!doctype html>
+<!-- Přijaté faktury: PDF (textová vrstva) -> heuristická extrakce -> validace -> revize -> Pohoda XML. Klientské, offline (kromě ARES). -->
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Přijaté faktury → Pohoda XML</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--txt:#e7ebf0;--mut:#95a0b3;--acc:#5b8cff;--ok:#2fbf71;--warn:#e0a83a;--bad:#e5533c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:1000px;margin:0 auto;padding:20px}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--mut);margin:0 0 18px}
+nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
+.btn{display:inline-block;padding:8px 14px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--txt);cursor:pointer;font-size:14px;text-decoration:none}
+.btn:hover{border-color:var(--acc)}
+.btn.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+.btn.ghost{background:transparent}
+.btn:disabled{opacity:.5;cursor:default}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.drop{border:1.5px dashed var(--line);border-radius:12px;padding:34px;text-align:center;color:var(--mut);cursor:pointer}
+.drop.hover{border-color:var(--acc);color:var(--txt)}
+.hidden{display:none}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:640px){.grid{grid-template-columns:1fr}}
+.fld label{display:block;font-size:12px;color:var(--mut);margin-bottom:3px}
+.fld input,.fld select{width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:#0e1016;color:var(--txt);font-size:14px}
+.fld input:focus{outline:none;border-color:var(--acc)}
+.fld{position:relative}
+.dot{position:absolute;right:9px;top:29px;width:9px;height:9px;border-radius:50%}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
+.sechead{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin:6px 0 10px}
+table.vat{width:100%;border-collapse:collapse;margin-top:6px}
+table.vat th,table.vat td{border:1px solid var(--line);padding:6px 8px;text-align:right;font-size:14px}
+table.vat th{color:var(--mut);font-weight:600;font-size:12px}
+table.vat input{width:100%;background:transparent;border:none;color:var(--txt);text-align:right;font-size:14px}
+table.vat input:focus{outline:1px solid var(--acc)}
+.banner{border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:14px}
+.banner.ok{background:rgba(47,191,113,.12);border:1px solid var(--ok)}
+.banner.warn{background:rgba(224,168,58,.12);border:1px solid var(--warn)}
+.banner.bad{background:rgba(229,83,60,.12);border:1px solid var(--bad)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.muted{color:var(--mut)}
+.pill{font-size:12px;padding:2px 8px;border-radius:20px;border:1px solid var(--line)}
+.foot{color:var(--mut);font-size:12px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="btn ghost" href="/">Přehled</a>
+    <a class="btn ghost" href="/prevod.html">PDF → GPC</a>
+    <a class="btn ghost" href="/parovani.html">Párování</a>
+    <a class="btn ghost" href="/faktury.html">Faktury</a>
+    <a class="btn" href="/prijate.html">Přijaté faktury</a>
+  </nav>
+
+  <h1>Přijaté faktury → Pohoda XML</h1>
+  <p class="sub">Nahraj PDF přijaté faktury (s textovou vrstvou). Pole se vytáhnou heuristicky, ověří (kontrolní součet IČO + aritmetika DPH) a ukážou k revizi. Teprve po tvém schválení se vygeneruje Pohoda XML.</p>
+
+  <div class="card">
+    <div id="drop" class="drop">
+      <div style="font-size:15px;color:var(--txt)">Přetáhni sem PDF faktury nebo klikni</div>
+      <div style="margin-top:6px">tuzemský i zahraniční dodavatel · zůstává v prohlížeči</div>
+      <input id="file" type="file" accept="application/pdf" class="hidden">
+    </div>
+    <div id="loading" class="hidden" style="margin-top:12px;color:var(--mut)">Čtu PDF…</div>
+  </div>
+
+  <div id="review" class="hidden"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";</script>
+<script>
+const $=id=>document.getElementById(id);
+const show=(el,v)=>el.classList[v?'remove':'add']('hidden');
+const OUR_ICO='09778268', OUR_DIC='CZ8211079943';
+const POH_PREDKONTACE='518služby', POH_CLENENI_TUZ='PD', POH_CLENENI_ZAHR='UE';  // UE = přijaté z EU (default návrh, účetní potvrdí)
+
+/* ---------- utils ---------- */
+const r2=x=>Math.round((+x||0)*100)/100;
+const gnum=x=>(+(Math.round((+x||0)*100)/100)).toString();
+function parseCzNum(s){ if(s==null) return NaN; const neg=/-/.test(String(s)); const t=String(s).replace(/[^\d.,]/g,'').replace(/\s/g,'').replace(',','.'); const v=parseFloat(t); return isNaN(v)?NaN:(neg?-v:v); }
+const xmlesc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const deacc=s=>(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+const CP1250=(()=>{const d=new TextDecoder('windows-1250'),m={};for(let b=0;b<256;b++)m[d.decode(new Uint8Array([b]))]=b;return m;})();
+const toCp1250=str=>{const o=new Uint8Array(str.length);for(let i=0;i<str.length;i++)o[i]=CP1250[str[i]]??0x3F;return o;};
+function isoDate(s){ const m=(s||'').match(/(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})/); return m?`${m[3]}-${String(+m[2]).padStart(2,'0')}-${String(+m[1]).padStart(2,'0')}`:''; }
+function czIcoValid(ico){ ico=String(ico||'').replace(/\D/g,''); if(!/^\d{8}$/.test(ico)) return false; const w=[8,7,6,5,4,3,2]; let s=0; for(let i=0;i<7;i++)s+=+ico[i]*w[i]; const c=(11-(s%11))%10; return c===+ico[7]; }
+
+/* ---------- PDF text ---------- */
+async function readPdf(buf){
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const lines=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const items=(await page.getTextContent()).items.filter(it=>it.str&&it.str.trim())
+      .map(it=>({x:it.transform[4],y:it.transform[5],s:it.str}));
+    items.sort((a,b)=>b.y-a.y||a.x-b.x);
+    let cur=null; const rows=[];
+    for(const it of items){ if(!cur||Math.abs(cur.y-it.y)>3){cur={y:it.y,toks:[]};rows.push(cur);} cur.toks.push(it); }
+    rows.forEach(r=>r.toks.sort((a,b)=>a.x-b.x));
+    rows.forEach(r=>lines.push({page:p,text:r.toks.map(t=>t.s).join(' ').replace(/\s+/g,' ').trim(),toks:r.toks}));
+  }
+  return lines;
+}
+
+/* ---------- heuristická extrakce ---------- */
+const DATE='(\\d{1,2}\\.\\s?\\d{1,2}\\.\\s?\\d{4})';
+function extractInvoice(lines){
+  const joined=lines.map(l=>l.text).join('\n');
+  const f={};
+
+  // --- IČO dodavatele: všechna IČ různá od našeho ---
+  const icos=[...joined.matchAll(/I[ČC]O?\s*:?\s*(\d[\d ]{5,}\d)/gi)].map(m=>m[1].replace(/\s/g,''));
+  f.supIco=icos.find(i=>/^\d{8}$/.test(i)&&i!==OUR_ICO)||'';
+
+  // --- DIČ dodavatele: DIČ / IČ DPH s prefixem země (bez vnitřních mezer), různé od našeho ---
+  const dics=[...joined.matchAll(/(?:DI[ČC]|I[ČC]\s*DPH)\s*:?\s*([A-Z]{2}\d{8,12})/gi)].map(m=>m[1]);
+  f.supDic=dics.find(d=>d!==OUR_DIC)||'';
+  f.foreign=!!(f.supDic && !/^CZ/.test(f.supDic));
+
+  // --- název dodavatele: firma s právní formou v bloku "Dodavatel", různá od odběratele a od bank ---
+  const NAMERE=/([A-ZÁ-Ž][A-Za-zÁ-ž0-9.&\- ]{1,40}?(?:s\.\s?r\.\s?o\.|a\.\s?s\.|spol\.\s*s\s*r\.?\s*o\.|s\.p\.|v\.o\.s\.))/g;
+  const pickName=txt=>([...txt.matchAll(NAMERE)].map(m=>m[1].replace(/\s+/g,' ').trim())
+    .filter(t=>!/Roman|Sorkin/i.test(t) && t.length>4 && !/Raiffeisen|spo[řr]iteln|Komer[čc]n[íi] banka|[ČC]SOB|Fio|Air Bank|MONETA|UniCredit|\bbanka\b/i.test(t))[0]||'');
+  const di=joined.search(/Dodavatel/i);
+  f.supName = (di>=0 ? pickName(joined.slice(di, di+300)) : '') || pickName(joined);
+
+  // --- číslo dokladu ---
+  f.number=(joined.match(/(?:da[ňn]ov[ýy] doklad|FAKTURA)[^\n]*?č\.?\s*(\d{5,})/i)||[])[1]
+          ||(joined.match(/FAKTURA\s+(\d{6,})/)||[])[1]||'';
+  // --- VS ---
+  f.vs=(joined.match(/Variabiln[íi] symbol\s*:?\s*(\d{4,})/i)||[])[1]
+      ||(joined.match(/\bVS\b[^\d]{0,20}(\d{6,})/i)||[])[1]||f.number;
+  // --- KS ---
+  f.ks=(joined.match(/Konstantn[íi] symbol\s*:?\s*(\d{3,4})/i)||[])[1]||'';
+
+  // --- datumy: přímé "štítek: datum" ---
+  const D=re=>{const m=joined.match(re);return m?m[1]:'';};
+  f.vyst=D(new RegExp('Datum vystaven[íi]\\s*:?\\s*'+DATE,'i'));
+  f.duzp=D(new RegExp('(?:zdaniteln[éeě]ho pln[ěe]n[íi]|uskute[čc]n[ěe]n[íi] pln[ěe]n[íi]|DUZP)\\s*:?\\s*'+DATE,'i'));
+  f.splat=D(new RegExp('Datum splatnosti\\s*:?\\s*'+DATE,'i'));
+  // fallback: trojice datumů v jednom řádku (hlavička "vystavení | plnění | splatnost")
+  if(!f.vyst||!f.duzp||!f.splat){
+    for(const l of lines){
+      const ds=l.text.match(new RegExp(DATE,'g'));
+      if(ds&&ds.length>=3&&/vystav|pln|splat/i.test(joined)){
+        f.vyst=f.vyst||ds[0]; f.duzp=f.duzp||ds[1]; f.splat=f.splat||ds[2]; break;
+      }
+    }
+  }
+
+  // --- účet / IBAN ---
+  f.iban=(joined.match(/\b(CZ\d{2}(?:\s?\d{4}){4}\s?\d{4})/)||[])[1]||'';
+  f.account=(joined.match(/[ČC][íi]slo\s*[úu][čc]tu[^\n]*?((?:\d{1,6}-)?\d{2,10}\s*\/\s*\d{4})/i)||[])[1]
+           ||(joined.match(/[ČC][íi]slo\s*[úu][čc]tu[^\n]*?\b(\d{6,10})\s+(\d{4})\b/i)||[]).slice(1).filter(Boolean).join('/')||'';
+  if(f.iban) f.account=f.account||f.iban;
+
+  // --- forma úhrady ---
+  f.pay=/kartou/i.test(joined)?'Kartou':(/[Pp][řr][íi]kazem/.test(joined)?'Příkazem':'Příkazem');
+
+  // --- rekapitulace DPH ---
+  f.vat=[]; f.total=NaN;
+  const iRec=joined.search(/Rekapitulace DPH/i);
+  const recap = iRec>=0 ? joined.slice(iRec) : '';
+  const AMT='(-?\\d[\\d \\u00a0]*[.,]\\d{2})';
+  if(recap){
+    // řádky "<základ> <sazba> <DPH> [<celkem>]" i "<sazba>% <základ> <DPH>"
+    const re1=new RegExp(AMT+'\\s+(0|10|12|15|21)\\s*%?\\s+'+AMT,'g'); let m;
+    while((m=re1.exec(recap))){ const base=parseCzNum(m[1]),rate=+m[2],dph=parseCzNum(m[3]); if((base||dph)) f.vat.push({base:r2(base),rate,dph:r2(dph)}); }
+  }
+  if(!f.vat.length){
+    // fallback bez tabulky: "Celkem bez DPH", "DPH", sazba z "21 %"
+    const base=parseCzNum((joined.match(new RegExp('Celkem bez DPH\\s*'+AMT,'i'))||[])[1]);
+    const dph=parseCzNum((joined.match(new RegExp('(?:^|\\n)\\s*DPH\\s*'+AMT,'i'))||[])[1]);
+    const rate=+((joined.match(/(\d{1,2})[.,]?\d{0,2}\s*%/)||[])[1]||21);
+    if(!isNaN(base)&&!isNaN(dph)) f.vat.push({base:r2(base),rate,dph:r2(dph)});
+  }
+  // celková částka k úhradě
+  f.total=parseCzNum((joined.match(new RegExp('(?:CELKEM K [ÚU]HRAD[ĚE]|K [úu]hrad[ěe] celkem[^\\d]*K[čc]?|Celkem s DPH)\\s*'+AMT,'i'))||[])[1]);
+  if(isNaN(f.total)&&f.vat.length) f.total=r2(f.vat.reduce((a,v)=>a+v.base+v.dph,0));
+
+  // --- záloha / vyúčtování (K úhradě 0) ---
+  f.advance = /Zaplacen[áa] z[áa]loha|Odpo[čc]et DPH zaplacen|zálohov[ýé]ch faktur|Ji[žz] zaplaceno|uhrazeno kartou/i.test(joined)
+            || (Math.abs(f.total)<0.005 && /z[áa]loh/i.test(joined));
+
+  return f;
+}
+
+/* ---------- validace ---------- */
+function validate(f){
+  const v={};
+  v.icoOk = czIcoValid(f.supIco) || (f.foreign && /^\d{6,10}$/.test(f.supIco||''));
+  v.icoState = czIcoValid(f.supIco)?'ok':(f.supIco?'warn':'bad');
+  v.dicState = f.supDic?'ok':'warn';
+  // aritmetika DPH
+  let dphMathOk=f.vat.length>0, sumBase=0,sumDph=0;
+  for(const row of f.vat){
+    sumBase+=row.base; sumDph+=row.dph;
+    if(row.rate>0 && Math.abs(r2(row.base*row.rate/100)-row.dph)>0.02) dphMathOk=false;
+  }
+  const sumTotal=r2(sumBase+sumDph);
+  v.dphMathOk=dphMathOk;
+  v.totalOk = !isNaN(f.total) && Math.abs(sumTotal-r2(f.total))<0.02;
+  v.dphState = (dphMathOk && v.totalOk)?'ok':'warn';
+  v.sumBase=r2(sumBase); v.sumDph=r2(sumDph); v.sumTotal=sumTotal;
+  v.datesOk = !!(f.vyst&&f.duzp&&f.splat);
+  v.canAuto = !f.advance && v.dphState==='ok' && v.icoState!=='bad' && v.datesOk && Math.abs(f.total)>0.005;
+  return v;
+}
+
+/* ---------- Pohoda XML (přijatá faktura, syntetická položka na sazbu) ---------- */
+function rateVAT(r){ return r>=21?'high':(r>=12?'low':(r>0?'low':'none')); }
+function buildPohodaXml(f){
+  const cleneni = f.foreign ? POH_CLENENI_ZAHR : POH_CLENENI_TUZ;
+  const items=f.vat.map(v=>`        <inv:invoiceItem>
+          <inv:text>Zdanitelné plnění ${v.rate} %</inv:text>
+          <inv:quantity>1</inv:quantity>
+          <inv:payVAT>false</inv:payVAT>
+          <inv:rateVAT>${rateVAT(v.rate)}</inv:rateVAT>
+          <inv:homeCurrency>
+            <typ:unitPrice>${gnum(v.base)}</typ:unitPrice>
+            <typ:price>${gnum(v.base)}</typ:price>
+            <typ:priceVAT>${gnum(v.dph)}</typ:priceVAT>
+          </inv:homeCurrency>
+          <inv:accounting><typ:ids>${POH_PREDKONTACE}</typ:ids></inv:accounting>
+          <inv:classificationVAT><typ:ids>${cleneni}</typ:ids></inv:classificationVAT>
+        </inv:invoiceItem>`).join('\n');
+  const addr=`          <typ:company>${xmlesc(f.supName||'')}</typ:company>
+            <typ:ico>${xmlesc((f.supIco||'').replace(/\D/g,''))}</typ:ico>${f.supDic?`
+            <typ:dic>${xmlesc(f.supDic)}</typ:dic>`:''}${f.supStreet?`
+            <typ:street>${xmlesc(f.supStreet)}</typ:street>`:''}${f.supCity?`
+            <typ:city>${xmlesc(f.supCity)}</typ:city>`:''}${f.supZip?`
+            <typ:zip>${xmlesc(f.supZip)}</typ:zip>`:''}
+            <typ:country><typ:ids>${xmlesc(f.foreign?(f.supDic||'').slice(0,2):'CZ')}</typ:ids></typ:country>`;
+  const item=`  <dat:dataPackItem id="RF-${xmlesc(f.number||f.vs)}" version="2.0">
+    <inv:invoice version="2.0">
+      <inv:invoiceHeader>
+        <inv:invoiceType>receivedInvoice</inv:invoiceType>
+        <inv:symVar>${xmlesc(f.vs||'')}</inv:symVar>
+        <inv:originalDocument>${xmlesc(f.number||'')}</inv:originalDocument>
+        <inv:date>${isoDate(f.vyst)}</inv:date>
+        <inv:dateTax>${isoDate(f.duzp)}</inv:dateTax>
+        <inv:dateAccounting>${isoDate(f.vyst)}</inv:dateAccounting>
+        <inv:dateKHDPH>${isoDate(f.duzp)}</inv:dateKHDPH>
+        <inv:dateDue>${isoDate(f.splat)}</inv:dateDue>
+        <inv:accounting><typ:ids>${POH_PREDKONTACE}</typ:ids></inv:accounting>
+        <inv:classificationVAT><typ:ids>${cleneni}</typ:ids></inv:classificationVAT>
+        <inv:text>${xmlesc(f.supName||'Přijatá faktura')}</inv:text>
+        <inv:partnerIdentity>
+          <typ:address>
+${addr}
+          </typ:address>
+        </inv:partnerIdentity>
+        <inv:paymentType><typ:ids>${xmlesc(f.pay||'Příkazem')}</typ:ids></inv:paymentType>
+      </inv:invoiceHeader>
+      <inv:invoiceDetail>
+${items}
+      </inv:invoiceDetail>
+    </inv:invoice>
+  </dat:dataPackItem>`;
+  return `<?xml version="1.0" encoding="Windows-1250"?>
+<dat:dataPack xmlns:dat="http://www.stormware.cz/schema/version_2/data.xsd" xmlns:inv="http://www.stormware.cz/schema/version_2/invoice.xsd" xmlns:typ="http://www.stormware.cz/schema/version_2/type.xsd" id="RF-${xmlesc(f.number||f.vs)}" ico="${OUR_ICO}" application="abo-gpc-viewer" version="2.0" note="Přijatá faktura -> Pohoda">
+${item}
+</dat:dataPack>
+`;
+}
+
+/* ---------- revizní UI ---------- */
+let F=null;
+function reval(){ const v=validate(F); paintValidation(v); return v; }
+function bindInputs(){
+  document.querySelectorAll('[data-f]').forEach(inp=>{
+    inp.oninput=()=>{ const k=inp.dataset.f; F[k]= inp.dataset.num? parseCzNum(inp.value): inp.value; if(k==='supDic') F.foreign=!!(F.supDic&&!/^CZ/.test(F.supDic)); reval(); };
+  });
+  document.querySelectorAll('[data-vat]').forEach(inp=>{
+    inp.oninput=()=>{ const [i,k]=inp.dataset.vat.split(':'); F.vat[+i][k]= k==='rate'? +inp.value : parseCzNum(inp.value); reval(); };
+  });
+}
+function dot(state){ return `<span class="dot ${state}"></span>`; }
+function fld(label,key,val,state,opts){ opts=opts||{};
+  return `<div class="fld"><label>${label}</label><input data-f="${key}" ${opts.num?'data-num="1"':''} value="${xmlesc(val==null?'':val)}">${state?dot(state):''}</div>`;
+}
+function render(){
+  const v=validate(F);
+  const vatRows=F.vat.map((r,i)=>`<tr>
+    <td><input data-vat="${i}:base" value="${gnum(r.base)}"></td>
+    <td><input data-vat="${i}:rate" value="${r.rate}" style="width:48px"></td>
+    <td><input data-vat="${i}:dph" value="${gnum(r.dph)}"></td>
+    <td class="muted">${gnum(r2(r.base+r.dph))}</td></tr>`).join('')||'<tr><td colspan="4" class="muted">nenačteno — doplň ručně</td></tr>';
+
+  $('review').innerHTML=`
+  <div id="banner"></div>
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <div class="sechead" style="margin:0">Dodavatel ${F.foreign?'<span class="pill">zahraniční</span>':'<span class="pill">tuzemský</span>'}</div>
+      <button class="btn" id="aresBtn" ${F.foreign?'disabled title="zahraniční – ARES nedohledá"':''}>Načíst z ARES</button>
+    </div>
+    <div class="grid" style="margin-top:8px">
+      ${fld('Název','supName',F.supName,F.supName?'ok':'warn')}
+      ${fld('IČO','supIco',F.supIco,v.icoState)}
+      ${fld('DIČ / IČ DPH','supDic',F.supDic,v.dicState)}
+      ${fld('Ulice','supStreet',F.supStreet)}
+      ${fld('Město','supCity',F.supCity)}
+      ${fld('PSČ','supZip',F.supZip)}
+    </div>
+  </div>
+  <div class="card">
+    <div class="sechead">Doklad</div>
+    <div class="grid">
+      ${fld('Číslo dokladu','number',F.number,F.number?'ok':'warn')}
+      ${fld('Variabilní symbol','vs',F.vs,F.vs?'ok':'warn')}
+      ${fld('Datum vystavení','vyst',F.vyst,F.vyst?'ok':'warn')}
+      ${fld('DUZP','duzp',F.duzp,F.duzp?'ok':'warn')}
+      ${fld('Splatnost','splat',F.splat,F.splat?'ok':'warn')}
+      ${fld('Číslo účtu / IBAN','account',F.account,F.account?'ok':'warn')}
+    </div>
+  </div>
+  <div class="card">
+    <div class="sechead">Rekapitulace DPH</div>
+    <table class="vat"><thead><tr><th>Základ</th><th>Sazba %</th><th>DPH</th><th>Celkem</th></tr></thead>
+    <tbody>${vatRows}</tbody></table>
+    <div class="row" style="justify-content:space-between;margin-top:10px">
+      <div class="muted">Součet: základ <b>${gnum(v.sumBase)}</b> + DPH <b>${gnum(v.sumDph)}</b> = <b>${gnum(v.sumTotal)}</b></div>
+      <div class="fld" style="width:170px">${fld('Celkem k úhradě','total',gnum(F.total),v.totalOk?'ok':'warn',{num:1})}</div>
+    </div>
+  </div>
+  <div class="row">
+    <button class="btn primary" id="genBtn">Generovat Pohoda XML</button>
+    <span id="genState" class="muted"></span>
+  </div>
+  <div class="foot">Předkontace <b>${POH_PREDKONTACE}</b>, členění DPH <b>${F.foreign?POH_CLENENI_ZAHR:POH_CLENENI_TUZ}</b>, do hlavičky importu jde tvoje IČO ${OUR_ICO}. Kódování Windows‑1250.</div>
+  `;
+  show($('review'),true);
+  bindInputs();
+  paintValidation(v);
+  $('aresBtn').onclick=aresLookup;
+  $('genBtn').onclick=generate;
+}
+function paintValidation(v){
+  const b=$('banner'); if(!b) return;
+  if(F.advance){ b.className='banner bad'; b.innerHTML='⚠ <b>Vyúčtování zálohy / K úhradě 0.</b> DPH bylo uplatněno na zálohové faktuře — tenhle doklad je potřeba zpracovat <b>ručně</b> (vazba na zálohovou fakturu). Auto‑generování je zablokované.'; }
+  else if(v.canAuto){ b.className='banner ok'; b.innerHTML='✓ <b>Sedí.</b> Aritmetika DPH i celková částka odpovídají, datumy i IČO OK. Zkontroluj a vygeneruj.'; }
+  else { b.className='banner warn'; b.innerHTML='⚠ <b>K revizi.</b> '+[
+      v.dphState!=='ok'?'DPH nesedí (základ×sazba≠DPH nebo součet≠celkem)':'',
+      !v.datesOk?'chybí datum':'',
+      v.icoState==='bad'?'chybí IČO':'',
+      Math.abs(F.total)<0.005?'nulová částka':''
+    ].filter(Boolean).join(' · ')+'. Oprav žlutá pole; pak můžeš vygenerovat.'; }
+  const gb=$('genBtn'); if(gb){ gb.disabled=F.advance; }
+}
+
+/* ---------- ARES ---------- */
+async function aresLookup(){
+  const ico=(F.supIco||'').replace(/\D/g,''); if(!/^\d{8}$/.test(ico)){ alert('Nejdřív potřebuju platné 8místné IČO.'); return; }
+  const btn=$('aresBtn'); btn.disabled=true; const o=btn.textContent; btn.textContent='ARES…';
+  try{
+    const r=await fetch('/api/ares/'+ico); const d=await r.json();
+    if(d.found===false){ alert('ARES firmu s IČO '+ico+' nenašel (nejspíš zahraniční — doplň ručně).'); }
+    else if(d.error){ alert('ARES: '+d.error); }
+    else { F.supName=d.name||F.supName; F.supDic=d.dic||F.supDic; F.supStreet=d.street||F.supStreet; F.supCity=d.city||F.supCity; F.supZip=d.zip||F.supZip; F.foreign=!!(F.supDic&&!/^CZ/.test(F.supDic)); render(); }
+  }catch(e){ alert('ARES nedostupný: '+e.message); }
+  finally{ btn.disabled=false; btn.textContent=o; }
+}
+
+/* ---------- generování ---------- */
+function generate(){
+  if(F.advance){ alert('Vyúčtování zálohy — zpracuj ručně.'); return; }
+  const v=validate(F);
+  if(!v.canAuto && !confirm('Některá pole nesedí (validace není zelená). Vygenerovat i tak?')) return;
+  const xml=buildPohodaXml(F);
+  const blob=new Blob([toCp1250(xml)],{type:'application/xml'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='pohoda-prijata-'+(F.number||F.vs||'faktura')+'.xml'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+  $('genState').textContent='Staženo: '+a.download;
+}
+
+/* ---------- vstup ---------- */
+async function handleFile(file){
+  if(!file) return;
+  show($('loading'),true); show($('review'),false);
+  try{
+    if(!window.pdfjsLib) throw new Error('pdf.js se nenačetl');
+    const lines=await readPdf(await file.arrayBuffer());
+    F=extractInvoice(lines);
+    render();
+  }catch(e){ alert('Nepodařilo se přečíst PDF: '+e.message); }
+  finally{ show($('loading'),false); }
+}
+const drop=$('drop');
+drop.onclick=()=>$('file').click();
+$('file').onchange=e=>handleFile(e.target.files[0]);
+['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('hover');}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('hover');}));
+drop.addEventListener('drop',e=>handleFile(e.dataTransfer.files[0]));
+</script>
+</body>
+</html>
