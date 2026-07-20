@@ -46,6 +46,7 @@ table.vat input:focus{outline:1px solid var(--acc)}
 .foot{color:var(--mut);font-size:12px;margin-top:8px}
 label .pick{display:inline-block;margin-left:5px;border:1px solid var(--line);background:#0e1016;color:var(--mut);border-radius:4px;cursor:pointer;font-size:11px;padding:0 5px;line-height:15px;vertical-align:middle}
 label .pick:hover,label .pick.on{border-color:var(--acc);color:var(--acc)}
+label .pick.has-anchor{border-color:var(--ok);color:var(--ok)}
 #pdfOverlay{cursor:crosshair}
 #selRect{position:absolute;border:1.5px solid var(--acc);background:rgba(91,140,255,.18);pointer-events:none;z-index:5}
 .tokglow{position:absolute;background:rgba(47,191,113,.16);outline:1px solid rgba(47,191,113,.55);pointer-events:none;z-index:4}
@@ -115,15 +116,21 @@ function isoDate(s){ const m=(s||'').match(/(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})/
 function czIcoValid(ico){ ico=String(ico||'').replace(/\D/g,''); if(!/^\d{8}$/.test(ico)) return false; const w=[8,7,6,5,4,3,2]; let s=0; for(let i=0;i<7;i++)s+=+ico[i]*w[i]; const c=(11-(s%11))%10; return c===+ico[7]; }
 
 /* ---------- PDF text ---------- */
-let PDFDOC=null;
+let PDFDOC=null, PAGES_NORM=[];
 async function readPdf(buf){
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-  PDFDOC=pdf;
+  PDFDOC=pdf; PAGES_NORM=[];
   const lines=[];
   for(let p=1;p<=pdf.numPages;p++){
     const page=await pdf.getPage(p);
-    const items=(await page.getTextContent()).items.filter(it=>it.str&&it.str.trim())
-      .map(it=>({x:it.transform[4],y:it.transform[5],s:it.str}));
+    const base=page.getViewport({scale:1});
+    const raw=(await page.getTextContent()).items.filter(it=>it.str&&it.str.trim());
+    // znormované pozice tokenů (0–1 v PDF souřadnicích, y nahoru) — pro kotvy
+    PAGES_NORM.push({w:base.width,h:base.height,toks:raw.map(it=>{
+      const x=it.transform[4],y=it.transform[5],w=it.width||0,h=it.height||10;
+      return {s:it.str, nx:(x+w/2)/base.width, ny:(y+h/2)/base.height};
+    })});
+    const items=raw.map(it=>({x:it.transform[4],y:it.transform[5],s:it.str}));
     items.sort((a,b)=>b.y-a.y||a.x-b.x);
     let cur=null; const rows=[];
     for(const it of items){ if(!cur||Math.abs(cur.y-it.y)>3){cur={y:it.y,toks:[]};rows.push(cur);} cur.toks.push(it); }
@@ -131,6 +138,25 @@ async function readPdf(buf){
     rows.forEach(r=>lines.push({page:p,text:r.toks.map(t=>t.s).join(' ').replace(/\s+/g,' ').trim(),toks:r.toks}));
   }
   return lines;
+}
+// spočti hodnotu pole z uložené kotvy (znormovaný box na dané stránce)
+function tokensInNormBox(page, box){
+  const pg=PAGES_NORM[(page||1)-1]; if(!pg) return '';
+  const x0=Math.min(box[0],box[2]),x1=Math.max(box[0],box[2]),y0=Math.min(box[1],box[3]),y1=Math.max(box[1],box[3]);
+  const hits=pg.toks.filter(k=>k.nx>=x0&&k.nx<=x1&&k.ny>=y0&&k.ny<=y1)
+    .sort((p,q)=> Math.abs(p.ny-q.ny)>0.008 ? q.ny-p.ny : p.nx-q.nx);
+  const ded=[]; for(const k of hits){ if(ded.some(u=>u.s===k.s&&Math.abs(u.nx-k.nx)<0.006&&Math.abs(u.ny-k.ny)<0.006)) continue; ded.push(k); }
+  return ded.map(k=>k.s).join(' ').replace(/\s+/g,' ').trim();
+}
+function applyAnchors(f){
+  const t=loadTpls()[f.supIco]; if(!t||!t.anchors) return 0; let n=0; f._anchored={};
+  for(const field in t.anchors){
+    const text=tokensInNormBox(t.anchors[field].page, t.anchors[field].box); if(!text) continue;
+    if(field==='__vat__'){ const rows=extractVatFromText(text); if(rows.length){f.vat=rows;f._anchored[field]=true;n++;} }
+    else if(field==='total'){ f.total=parseCzNum(text); f._anchored[field]=true; n++; }
+    else { f[field]=text; if(field==='supDic')f.foreign=!!(f.supDic&&!/^CZ/.test(f.supDic)); if(field==='supIco')f.supIco=text.replace(/\s/g,''); f._anchored[field]=true; n++; }
+  }
+  return n;
 }
 
 /* ---------- heuristická extrakce ---------- */
@@ -344,7 +370,8 @@ function bindInputs(){
 }
 function dot(state){ return `<span class="dot ${state}"></span>`; }
 function fld(label,key,val,state,opts){ opts=opts||{};
-  const pick = opts.nopick?'':`<button class="pick" data-pick="${key}" title="Označit v PDF">◎</button>`;
+  const anch=(F&&F._anchored&&F._anchored[key])?' has-anchor':'';
+  const pick = opts.nopick?'':`<button class="pick${anch}" data-pick="${key}" title="${anch?'Naučená kotva – klikni pro nové označení':'Označit v PDF'}">◎</button>`;
   return `<div class="fld"><label>${label}${pick}</label><input data-f="${key}" ${opts.num?'data-num="1"':''} value="${xmlesc(val==null?'':val)}">${state?dot(state):''}</div>`;
 }
 function render(){
@@ -358,6 +385,7 @@ function render(){
 
   $('review').innerHTML=`
   <div id="banner"></div>
+  ${F._anchorsApplied?'<div class="banner ok" style="padding:8px 12px;margin-bottom:14px">◎ Použito '+F._anchorsApplied+' naučených kotev dodavatele (zelené ◎). Zkontroluj; kdyby některá sáhla vedle, přeznač ji.</div>':''}
   <div class="card">
     <div class="row" style="justify-content:space-between">
       <div class="sechead" style="margin:0">Dodavatel ${F.foreign?'<span class="pill">zahraniční</span>':'<span class="pill">tuzemský</span>'}</div>
@@ -416,6 +444,7 @@ function render(){
     <div class="spacer" style="flex:1"></div>
     <button class="btn ghost" id="tplExport" title="Záloha šablon dodavatelů jako JSON">Zálohovat šablony</button>
     <button class="btn ghost" id="tplImport" title="Načíst šablony z JSON">Načíst šablony</button>
+    <button class="btn ghost" id="tplForget" title="Smazat naučené kotvy pro tohoto dodavatele">Zapomenout kotvy</button>
     <input id="tplFile" type="file" accept="application/json" class="hidden">
   </div>
   <div class="foot">Do hlavičky importu jde tvoje IČO ${OUR_ICO}. Kódování Windows‑1250.</div>
@@ -428,6 +457,7 @@ function render(){
   $('tplExport').onclick=exportTpls;
   $('tplImport').onclick=()=>$('tplFile').click();
   $('tplFile').onchange=importTpls;
+  $('tplForget').onclick=forgetAnchors;
   document.querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>setActive(b.dataset.pick));
   document.querySelectorAll('.pick').forEach(b=>b.classList.toggle('on', b.dataset.pick===ACTIVE_FIELD));
   if($('vatAdd')) $('vatAdd').onclick=()=>{ F.vat.push({base:0,rate:21,dph:0}); render(); };
@@ -467,9 +497,11 @@ function generate(){
   const blob=new Blob([toCp1250(xml)],{type:'application/xml'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='pohoda-prijata-'+(F.number||F.vs||'faktura')+'.xml'; a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),3000);
-  // zapamatuj zaúčtování pro toto IČO
-  saveTpl(F.supIco, {predkontace:F.predkontace, cleneni:F.cleneni, name:F.supName});
-  $('genState').textContent='Staženo: '+a.download+' · zaúčtování uloženo pro IČO '+(F.supIco||'—');
+  // zapamatuj zaúčtování + naučené kotvy pro toto IČO
+  const prevAnchors=(loadTpls()[F.supIco]||{}).anchors||{};
+  saveTpl(F.supIco, {predkontace:F.predkontace, cleneni:F.cleneni, name:F.supName, anchors:Object.assign({}, prevAnchors, F._anchors||{})});
+  const nA=Object.keys(F._anchors||{}).length;
+  $('genState').textContent='Staženo: '+a.download+' · uloženo pro IČO '+(F.supIco||'—')+(nA?' (+'+nA+' kotev)':'');
 }
 
 /* ---------- záloha / obnova šablon (most k repu/DB) ---------- */
@@ -477,6 +509,12 @@ function exportTpls(){
   const blob=new Blob([JSON.stringify(loadTpls(),null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='sablony-dodavatelu.json'; a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+}
+function forgetAnchors(){
+  if(!F||!F.supIco){ alert('Není známé IČO dodavatele.'); return; }
+  const all=loadTpls(); if(all[F.supIco]){ delete all[F.supIco].anchors; localStorage.setItem('rf_templates', JSON.stringify(all)); }
+  F._anchors={}; F._anchored={}; F._anchorsApplied=0; render();
+  alert('Naučené kotvy pro IČO '+F.supIco+' byly smazány. (Předkontace/členění zůstávají.)');
 }
 async function importTpls(e){
   const file=e.target.files[0]; if(!file) return;
@@ -542,7 +580,17 @@ function initPreviewUI(){
     const inside=[];   // odstraň překryté duplicity (stejný text na skoro stejné pozici)
     for(const t of hits){ if(inside.some(u=>u.s===t.s && Math.abs(u.cx-t.cx)<4 && Math.abs(u.cy-t.cy)<4)) continue; inside.push(t); }
     const text=inside.map(t=>t.s).join(' ').replace(/\s+/g,' ').trim();
-    if(text) setFieldValue(ACTIVE_FIELD, text); else clearActive();
+    const fld=ACTIVE_FIELD;
+    if(text){
+      // ulož kotvu: canvas box -> PDF bod -> normovaný box (pro učení šablony)
+      if(PV_VP && PAGES_NORM[PV_PAGE-1]){
+        const p1=PV_VP.convertToPdfPoint(bx1,by1), p2=PV_VP.convertToPdfPoint(bx2,by2);
+        const W=PAGES_NORM[PV_PAGE-1].w, H=PAGES_NORM[PV_PAGE-1].h;
+        F._anchors=F._anchors||{};
+        F._anchors[fld]={page:PV_PAGE, box:[p1[0]/W,p1[1]/H,p2[0]/W,p2[1]/H]};
+      }
+      setFieldValue(fld, text);
+    } else clearActive();
   };
   ov.addEventListener('mousedown',start); window.addEventListener('mousemove',move); window.addEventListener('mouseup',end);
   ov.addEventListener('touchstart',start,{passive:false}); ov.addEventListener('touchmove',move,{passive:false}); ov.addEventListener('touchend',end);
@@ -558,7 +606,8 @@ async function handleFile(file){
     if(!window.pdfjsLib) throw new Error('pdf.js se nenačetl');
     const lines=await readPdf(await file.arrayBuffer());
     F=extractInvoice(lines);
-    F._tpl=applyTpl(F);   // předvyplň zaúčtování ze šablony dodavatele (pokud existuje)
+    F._tpl=applyTpl(F);            // předvyplň zaúčtování ze šablony
+    F._anchorsApplied=applyAnchors(F);  // deterministicky přepiš pole dle naučených kotev
     clearActive();
     render();
     renderPreview(1);
