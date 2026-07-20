@@ -77,7 +77,9 @@ table.vat input:focus{outline:1px solid var(--acc)}
 const $=id=>document.getElementById(id);
 const show=(el,v)=>el.classList[v?'remove':'add']('hidden');
 const OUR_ICO='09778268', OUR_DIC='CZ8211079943';
-const POH_PREDKONTACE='518služby', POH_CLENENI_TUZ='PD', POH_CLENENI_ZAHR='UE';  // UE = přijaté z EU (default návrh, účetní potvrdí)
+const POH_PREDKONTACE='služby', POH_CLENENI_TUZ='PD', POH_CLENENI_ZAHR='UE';
+const PREDKONTACE_OPTS=['služby','nákup zboží','spotřeba materiálu','majetek'];
+const CLENENI_OPTS=['PD','UE','UD','UN'];  // PD tuzemské, UE přijaté z EU, UD/UN dle potřeby
 
 /* ---------- utils ---------- */
 const r2=x=>Math.round((+x||0)*100)/100;
@@ -187,8 +189,17 @@ function extractInvoice(lines){
   f.advance = /Zaplacen[áa] z[áa]loha|Odpo[čc]et DPH zaplacen|zálohov[ýé]ch faktur|Ji[žz] zaplaceno|uhrazeno kartou/i.test(joined)
             || (Math.abs(f.total)<0.005 && /z[áa]loh/i.test(joined));
 
+  // --- zaúčtování (default; přepíše šablona dodavatele nebo ruční volba) ---
+  f.predkontace = POH_PREDKONTACE;
+  f.cleneni = f.foreign ? POH_CLENENI_ZAHR : POH_CLENENI_TUZ;
+
   return f;
 }
+
+/* ---------- paměť šablon per dodavatel (IČO) ---------- */
+function loadTpls(){ try{ return JSON.parse(localStorage.getItem('rf_templates')||'{}'); }catch{ return {}; } }
+function saveTpl(ico, t){ if(!ico) return; const all=loadTpls(); all[ico]=Object.assign(all[ico]||{}, t); localStorage.setItem('rf_templates', JSON.stringify(all)); }
+function applyTpl(f){ const t=loadTpls()[f.supIco]; if(!t) return false; if(t.predkontace)f.predkontace=t.predkontace; if(t.cleneni)f.cleneni=t.cleneni; if(t.name&&!f.supName)f.supName=t.name; return true; }
 
 /* ---------- validace ---------- */
 function validate(f){
@@ -215,7 +226,8 @@ function validate(f){
 /* ---------- Pohoda XML (přijatá faktura, syntetická položka na sazbu) ---------- */
 function rateVAT(r){ return r>=21?'high':(r>=12?'low':(r>0?'low':'none')); }
 function buildPohodaXml(f){
-  const cleneni = f.foreign ? POH_CLENENI_ZAHR : POH_CLENENI_TUZ;
+  const cleneni = f.cleneni || (f.foreign ? POH_CLENENI_ZAHR : POH_CLENENI_TUZ);
+  const predk = f.predkontace || POH_PREDKONTACE;
   const items=f.vat.map(v=>`        <inv:invoiceItem>
           <inv:text>Zdanitelné plnění ${v.rate} %</inv:text>
           <inv:quantity>1</inv:quantity>
@@ -226,8 +238,8 @@ function buildPohodaXml(f){
             <typ:price>${gnum(v.base)}</typ:price>
             <typ:priceVAT>${gnum(v.dph)}</typ:priceVAT>
           </inv:homeCurrency>
-          <inv:accounting><typ:ids>${POH_PREDKONTACE}</typ:ids></inv:accounting>
-          <inv:classificationVAT><typ:ids>${cleneni}</typ:ids></inv:classificationVAT>
+          <inv:accounting><typ:ids>${xmlesc(predk)}</typ:ids></inv:accounting>
+          <inv:classificationVAT><typ:ids>${xmlesc(cleneni)}</typ:ids></inv:classificationVAT>
         </inv:invoiceItem>`).join('\n');
   const addr=`          <typ:company>${xmlesc(f.supName||'')}</typ:company>
             <typ:ico>${xmlesc((f.supIco||'').replace(/\D/g,''))}</typ:ico>${f.supDic?`
@@ -247,8 +259,8 @@ function buildPohodaXml(f){
         <inv:dateAccounting>${isoDate(f.vyst)}</inv:dateAccounting>
         <inv:dateKHDPH>${isoDate(f.duzp)}</inv:dateKHDPH>
         <inv:dateDue>${isoDate(f.splat)}</inv:dateDue>
-        <inv:accounting><typ:ids>${POH_PREDKONTACE}</typ:ids></inv:accounting>
-        <inv:classificationVAT><typ:ids>${cleneni}</typ:ids></inv:classificationVAT>
+        <inv:accounting><typ:ids>${xmlesc(predk)}</typ:ids></inv:accounting>
+        <inv:classificationVAT><typ:ids>${xmlesc(cleneni)}</typ:ids></inv:classificationVAT>
         <inv:text>${xmlesc(f.supName||'Přijatá faktura')}</inv:text>
         <inv:partnerIdentity>
           <typ:address>
@@ -328,17 +340,36 @@ function render(){
       <div class="fld" style="width:170px">${fld('Celkem k úhradě','total',gnum(F.total),v.totalOk?'ok':'warn',{num:1})}</div>
     </div>
   </div>
+  <div class="card">
+    <div class="sechead">Zaúčtování ${F._tpl?'<span class="pill" style="border-color:var(--ok);color:var(--ok)">šablona dodavatele</span>':'<span class="pill">bez šablony</span>'}</div>
+    <div class="grid">
+      <div class="fld"><label>Předkontace</label>
+        <input data-f="predkontace" list="predkOpts" value="${xmlesc(F.predkontace||'')}">
+        <datalist id="predkOpts">${PREDKONTACE_OPTS.map(o=>'<option value="'+o+'">').join('')}</datalist></div>
+      <div class="fld"><label>Členění DPH</label>
+        <input data-f="cleneni" list="clenOpts" value="${xmlesc(F.cleneni||'')}">
+        <datalist id="clenOpts">${CLENENI_OPTS.map(o=>'<option value="'+o+'">').join('')}</datalist></div>
+    </div>
+    <div class="foot">Hodnota jde do Pohody jako <code>&lt;accounting&gt;&lt;ids&gt;</code> — musí sedět na název předkontace v Pohodě (neznámá = jen upozornění, import projde). Po vygenerování se předkontace i členění <b>zapamatují pro toto IČO</b> a příště se předvyplní.</div>
+  </div>
   <div class="row">
     <button class="btn primary" id="genBtn">Generovat Pohoda XML</button>
     <span id="genState" class="muted"></span>
+    <div class="spacer" style="flex:1"></div>
+    <button class="btn ghost" id="tplExport" title="Záloha šablon dodavatelů jako JSON">Zálohovat šablony</button>
+    <button class="btn ghost" id="tplImport" title="Načíst šablony z JSON">Načíst šablony</button>
+    <input id="tplFile" type="file" accept="application/json" class="hidden">
   </div>
-  <div class="foot">Předkontace <b>${POH_PREDKONTACE}</b>, členění DPH <b>${F.foreign?POH_CLENENI_ZAHR:POH_CLENENI_TUZ}</b>, do hlavičky importu jde tvoje IČO ${OUR_ICO}. Kódování Windows‑1250.</div>
+  <div class="foot">Do hlavičky importu jde tvoje IČO ${OUR_ICO}. Kódování Windows‑1250.</div>
   `;
   show($('review'),true);
   bindInputs();
   paintValidation(v);
   $('aresBtn').onclick=aresLookup;
   $('genBtn').onclick=generate;
+  $('tplExport').onclick=exportTpls;
+  $('tplImport').onclick=()=>$('tplFile').click();
+  $('tplFile').onchange=importTpls;
 }
 function paintValidation(v){
   const b=$('banner'); if(!b) return;
@@ -375,7 +406,23 @@ function generate(){
   const blob=new Blob([toCp1250(xml)],{type:'application/xml'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='pohoda-prijata-'+(F.number||F.vs||'faktura')+'.xml'; a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),3000);
-  $('genState').textContent='Staženo: '+a.download;
+  // zapamatuj zaúčtování pro toto IČO
+  saveTpl(F.supIco, {predkontace:F.predkontace, cleneni:F.cleneni, name:F.supName});
+  $('genState').textContent='Staženo: '+a.download+' · zaúčtování uloženo pro IČO '+(F.supIco||'—');
+}
+
+/* ---------- záloha / obnova šablon (most k repu/DB) ---------- */
+function exportTpls(){
+  const blob=new Blob([JSON.stringify(loadTpls(),null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='sablony-dodavatelu.json'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+}
+async function importTpls(e){
+  const file=e.target.files[0]; if(!file) return;
+  try{ const inc=JSON.parse(await file.text()); const all=Object.assign(loadTpls(), inc); localStorage.setItem('rf_templates', JSON.stringify(all));
+    if(F){ F._tpl=applyTpl(F); render(); } alert('Šablony načteny ('+Object.keys(inc).length+' dodavatelů).');
+  }catch(err){ alert('Neplatný JSON: '+err.message); }
+  finally{ e.target.value=''; }
 }
 
 /* ---------- vstup ---------- */
@@ -386,6 +433,7 @@ async function handleFile(file){
     if(!window.pdfjsLib) throw new Error('pdf.js se nenačetl');
     const lines=await readPdf(await file.arrayBuffer());
     F=extractInvoice(lines);
+    F._tpl=applyTpl(F);   // předvyplň zaúčtování ze šablony dodavatele (pokud existuje)
     render();
   }catch(e){ alert('Nepodařilo se přečíst PDF: '+e.message); }
   finally{ show($('loading'),false); }
