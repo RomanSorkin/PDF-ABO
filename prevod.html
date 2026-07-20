@@ -1,0 +1,529 @@
+<!-- PDF -> GPC converter — client-side, offline. Supports Raiffeisenbank + Air Bank. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF → GPC · převod výpisu</title>
+<style>
+  :root{
+    --paper:#FBFBFD; --panel:#FFFFFF; --ink:#171B26; --ink-2:#3A4152;
+    --muted:#7A8296; --line:#E6E8EF; --line-2:#EFF1F6;
+    --accent:#3B3F8F; --kredit:#0F7A52; --kredit-bg:#EAF6F0;
+    --debet:#B03A2E; --debet-bg:#FBEDEA;
+    --mono:"JetBrains Mono","SF Mono",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+    --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.45;
+       -webkit-font-smoothing:antialiased;padding:0 0 72px}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 20px}
+  header.top{border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:20}
+  .top .wrap{display:flex;align-items:center;gap:16px;height:60px}
+  .brand{display:flex;align-items:baseline;gap:10px;font-weight:700;letter-spacing:-.02em;font-size:16px}
+  .brand .tag{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--accent);
+       border:1px solid var(--accent);border-radius:5px;padding:1px 6px;letter-spacing:.04em}
+  .top .spacer{flex:1}
+  .navlink{font-weight:600;font-size:13px;color:var(--ink-2);text-decoration:none;padding:8px 10px;border-radius:8px}
+  .navlink:hover{background:var(--line-2);color:var(--ink)}
+  .btn{font:inherit;font-weight:600;font-size:13px;border:1px solid var(--line);background:var(--panel);
+       color:var(--ink);padding:8px 14px;border-radius:8px;cursor:pointer;transition:.12s;text-decoration:none;display:inline-block}
+  .btn:hover{border-color:var(--ink-2)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.ok{background:var(--kredit);border-color:var(--kredit);color:#fff}
+  .btn.ghost{border-color:transparent;color:var(--muted)}
+  .btn.ghost:hover{color:var(--ink);background:var(--line-2)}
+  input[type=file]{display:none}
+
+  .pipe{display:flex;align-items:center;gap:10px;margin:26px 0 6px;font-family:var(--mono);font-size:12px;flex-wrap:wrap}
+  .pipe .node{display:flex;align-items:center;gap:8px;padding:7px 13px;border:1px solid var(--line);border-radius:22px;
+       background:var(--panel);color:var(--muted);font-weight:600}
+  .pipe .node.on{border-color:var(--accent);color:var(--accent);background:#F5F5FD}
+  .pipe .node.done{border-color:var(--kredit);color:var(--kredit);background:var(--kredit-bg)}
+  .pipe .arr{color:var(--line);font-weight:700}
+
+  .drop{margin:16px 0 0;border:1.5px dashed var(--line);border-radius:16px;background:var(--panel);
+        padding:52px 24px;text-align:center;transition:.15s}
+  .drop.hot{border-color:var(--accent);background:#F5F5FD}
+  .drop h1{margin:0 0 6px;font-size:22px;letter-spacing:-.02em}
+  .drop p{margin:0 auto;max-width:580px;color:var(--muted)}
+  .drop .banks{margin-top:14px;font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+  .drop .banks b{color:var(--ink-2)}
+  .drop .actions{margin-top:22px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+  .status{margin-top:18px;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+
+  .err{margin:18px 0;padding:14px 16px;border:1px solid var(--debet);background:var(--debet-bg);
+       color:var(--debet);border-radius:10px;font-size:13px}
+
+  .result{margin:22px 0 0}
+  .recon-card{display:flex;align-items:center;gap:16px;padding:16px 20px;border-radius:12px;margin-bottom:16px;
+       border:1px solid var(--line);background:var(--panel)}
+  .recon-card.ok{border-color:var(--kredit);background:var(--kredit-bg)}
+  .recon-card.bad{border-color:var(--debet);background:var(--debet-bg)}
+  .recon-card .big{font-size:22px;font-weight:800;font-family:var(--mono)}
+  .recon-card.ok .big{color:var(--kredit)} .recon-card.bad .big{color:var(--debet)}
+  .recon-card .detail{font-size:12.5px;color:var(--ink-2);font-family:var(--mono);line-height:1.7}
+  .recon-card .cta{margin-left:auto;display:flex;gap:10px}
+  .bankchip{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:700;color:var(--accent);
+       border:1px solid var(--accent);border-radius:5px;padding:1px 7px;margin-left:8px;vertical-align:2px}
+
+  .head-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line-2);
+       border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:18px}
+  .head-grid .cell{background:var(--panel);padding:12px 16px}
+  .head-grid .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+  .head-grid .val{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600;font-size:16px;margin-top:2px}
+  .head-grid .val.deb{color:var(--debet)} .head-grid .val.kre{color:var(--kredit)}
+  .head-meta{font-family:var(--mono);font-size:12.5px;color:var(--ink-2);margin-bottom:14px}
+  .head-meta b{color:var(--ink)}
+
+  .tablewrap{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel)}
+  table{width:100%;border-collapse:collapse}
+  thead th{background:var(--panel);text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.06em;
+       color:var(--muted);font-weight:700;padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+  thead th.num{text-align:right}
+  tbody tr{border-bottom:1px solid var(--line-2)}
+  td{padding:9px 14px;vertical-align:top}
+  td.date{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--ink-2);white-space:nowrap;font-size:13px}
+  td.party{font-weight:600;max-width:280px}
+  td.sym{font-family:var(--mono);font-size:12.5px;color:var(--ink-2);white-space:nowrap}
+  td.amount{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
+  td.amount.pos{color:var(--kredit)} td.amount.neg{color:var(--debet)}
+
+  details.debug{margin:18px 0 0;border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
+  details.debug summary{cursor:pointer;padding:12px 16px;font-weight:600;font-size:13px;color:var(--ink-2);user-select:none}
+  details.debug pre{margin:0;padding:14px 16px;border-top:1px solid var(--line-2);background:#0F1420;color:#C6CBDB;
+       font-family:var(--mono);font-size:11.5px;line-height:1.7;max-height:340px;overflow:auto;white-space:pre-wrap}
+  .hidden{display:none!important}
+  @media(max-width:760px){
+    .head-grid{grid-template-columns:repeat(2,1fr)}
+    td.sym{display:none} thead th.sym{display:none}
+    .recon-card{flex-wrap:wrap} .recon-card .cta{margin-left:0;width:100%}
+  }
+</style>
+
+<header class="top">
+  <div class="wrap">
+    <div class="brand">PDF → GPC <span class="tag">.pdf ➜ .gpc</span></div>
+    <div class="spacer"></div>
+    <a class="navlink" href="/index.html">Prohlížeč GPC →</a>
+    <a class="navlink" href="/parovani.html">Párování</a>
+    <a class="navlink" href="/faktury.html">Faktury</a>
+    <button class="btn primary" id="btnOpen">Vybrat PDF</button>
+    <input type="file" id="file" accept="application/pdf,.pdf">
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="pipe">
+    <span class="node" id="n1">1 · PDF výpis</span><span class="arr">→</span>
+    <span class="node" id="n2">2 · kontrola součtů</span><span class="arr">→</span>
+    <span class="node" id="n3">3 · GPC ke stažení</span>
+  </div>
+
+  <div id="drop" class="drop">
+    <h1>Nahraj PDF výpis</h1>
+    <p>Převod proběhne celý ve tvém prohlížeči — PDF se nikam neposílá. Ze souboru se přečte hlavička
+       i pohyby, ověří se, že příjmy a výdaje sedí na konečný zůstatek, a vznikne GPC (věty 074/075,
+       128 znaků, kódování Windows-1250) připravený k importu do Pohody.</p>
+    <div class="banks">Rozpozná: <b>Raiffeisenbank</b> · <b>Air Bank</b> · <b>Česká spořitelna</b> — banka se detekuje automaticky.</div>
+    <div class="actions">
+      <button class="btn primary" id="btnOpen2">Vybrat PDF soubor</button>
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div id="errbox" class="err hidden"></div>
+  <div id="result" class="result hidden"></div>
+  <details class="debug hidden" id="debugBox">
+    <summary>Rozpoznaný text z PDF (pro ladění)</summary>
+    <pre id="debugPre"></pre>
+  </details>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+}
+const $ = (id)=>document.getElementById(id);
+const show=(el,on)=>el.classList.toggle('hidden',!on);
+function stage(n){ [1,2,3].forEach(i=>{const el=$('n'+i);el.classList.toggle('done',i<n);el.classList.toggle('on',i===n);}); }
+
+/* ---------- CP1250 encoder built from the browser's own decode table ---------- */
+const CP1250 = (()=>{ const d=new TextDecoder('windows-1250'),m={};
+  for(let b=0;b<256;b++) m[d.decode(new Uint8Array([b]))]=b; return m; })();
+function toCp1250Bytes(str){
+  const out=new Uint8Array(str.length);
+  for(let i=0;i<str.length;i++) out[i]=CP1250[str[i]] ?? 0x3F;
+  return out;
+}
+function deacc(s){ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+
+/* ---------- helpers ---------- */
+const pad=(s,w)=>String(s).slice(0,w).padEnd(w,' ');
+const zero=(n,w)=>String(Math.round(Math.abs(Number(n)||0))).padStart(w,'0').slice(-w);
+function parseCzNum(s){
+  if(!s) return NaN;
+  const neg=/-/.test(s); const t=s.replace(/[^\d.,]/g,'').replace(/\s/g,'').replace(',', '.');
+  const v=parseFloat(t); return isNaN(v)?NaN:(neg?-v:v);
+}
+const NUM='(-?\\s?[\\d\\s]*\\d[.,]\\d{2})';
+function ddmmrr(d){ return String(d.d).padStart(2,'0')+String(d.m).padStart(2,'0')+String(d.y%100).padStart(2,'0'); }
+// Formát čísla účtu v GPC: 'vnitrni' (permutovaný — co čeká Pohoda) nebo 'edicni' (standardní).
+// Vnitřní permutace dle technické specifikace ABO:
+//   Ediční:  P1..P6 C1..C9C0   ->   Vnitřní: C0 C8 C9 C6 C1 C2 C3 C4 C5 C7 P1..P6
+const ABO_PERM=[15,13,14,11,6,7,8,9,10,12,0,1,2,3,4,5];
+let GPC_FORMAT='vnitrni';
+function accGpc(s){
+  if(!s || /\*/.test(String(s))) return '0'.repeat(16);   // karty apod.
+  s=String(s).split('/')[0];                              // pryč kód banky
+  let pre='', num=s;
+  if(s.includes('-')){ const p=s.split('-'); pre=p[0]; num=p[1]; }
+  pre=(pre||'').replace(/\D/g,'').padStart(6,'0').slice(-6);
+  num=(num||'').replace(/\D/g,'');
+  if(!num) return '0'.repeat(16);
+  num=num.padStart(10,'0').slice(-10);
+  const edicni=pre+num;                                   // předčíslí(6)+číslo(10)
+  if(GPC_FORMAT==='edicni') return edicni;
+  return ABO_PERM.map(i=>edicni[i]).join('');             // permutace na vnitřní tvar
+}
+const parseDate=(s)=>{const m=s.match(/(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})/);return m?{d:+m[1],m:+m[2],y:+m[3]}:null;};
+
+/* ---------- PDF text: reconstruct visual rows via item positions ---------- */
+async function extractRows(buf){
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const pages=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const tc=await page.getTextContent();
+    const items=tc.items.filter(it=>it.str && it.str.trim().length)
+      .map(it=>({x:it.transform[4], y:it.transform[5], s:it.str}));
+    items.sort((a,b)=> b.y-a.y || a.x-b.x);
+    const rows=[]; let cur=null;
+    for(const it of items){
+      if(!cur || Math.abs(cur.y-it.y)>3){ cur={y:it.y, toks:[]}; rows.push(cur); }
+      cur.toks.push(it);
+    }
+    rows.forEach(r=>r.toks.sort((a,b)=>a.x-b.x));
+    pages.push(rows);
+  }
+  return pages;
+}
+function flatten(pages){
+  const lines=[];
+  pages.forEach((rows,pi)=>rows.forEach(r=>lines.push({
+    page:pi+1, y:r.y, text:r.toks.map(t=>t.s).join(' ').replace(/\s+/g,' ').trim(), toks:r.toks
+  })));
+  return lines;
+}
+
+/* ---------- bank detection ---------- */
+function detectBank(joined){
+  if(/Air Bank|AIRACZPP|airbank\.cz/i.test(joined)) return 'airbank';
+  if(/Česká spořitelna|ČESKÁ SPOŘITELNA|GIBACZPX|csas\.cz|Výpis z kartového účtu/i.test(joined)) return 'cs';
+  if(/Raiffeisenbank|RZBCCZPP/i.test(joined)) return 'raiffeisen';
+  return 'raiffeisen'; // default fallback
+}
+
+/* ---------- column splitter from a detected header row ---------- */
+function makeColumnizer(lines, headerTest, marks){
+  let hdr=null;
+  for(const l of lines){ if(headerTest(l.text)){ hdr=l; break; } }
+  const c={};
+  if(hdr){ for(const k in marks){ const t=hdr.toks.find(t=>marks[k].test(t.s)); if(t) c[k]=t.x; } }
+  return {hdr, x:c};
+}
+
+/* ========== RAIFFEISENBANK ========== */
+function parseRaiffeisen(lines, joined){
+  const H={bank:'RAIFFEISENBANK'};
+  const mAcc=joined.match(/Číslo účtu:\s*([\d-]+)\/(\d+)/); if(mAcc){H.account=mAcc[1];H.bankCode=mAcc[2];}
+  // měna účtu (CZK/EUR/USD/PLN…) — z hlavičky "Číslo účtu: …/5500 EUR" nebo "Měna účtu: EUR"
+  H.currency=(joined.match(/Číslo účtu:\s*[\d-]+\/\d+\s*([A-Z]{3})/)||joined.match(/Měna účtu:\s*([A-Z]{3})/)||[])[1]||'CZK';
+  const mName=joined.match(/Název účtu:\s*([^\n]+)/); H.name=mName?mName[1].trim():'';
+  const mS=joined.match(/Pořadové č\.?\s*výpisu:\s*(\d+)\s*za období:\s*(\d+)\.\s*(\d+)\.\s*(\d+)\s*-\s*(\d+)\.\s*(\d+)\.\s*(\d+)/);
+  if(mS){H.stmtNo=+mS[1];H.from={d:+mS[2],m:+mS[3],y:+mS[4]};H.to={d:+mS[5],m:+mS[6],y:+mS[7]};}
+  const g=(re)=>{const m=joined.match(re);return m?parseCzNum(m[1]):NaN;};
+  H.opening=g(new RegExp('Počáteční zůstatek:\\s*'+NUM));
+  H.closing=g(new RegExp('Konečný zůstatek:\\s*'+NUM));
+  H.income =g(new RegExp('Příjmy celkem:\\s*'+NUM));
+  H.expense=g(new RegExp('Výdaje celkem:\\s*'+NUM));
+
+  const {x:c}=makeColumnizer(lines,
+    t=>/Kategorie transakce/.test(t)&&/Typ transakce/.test(t),
+    {kat:/Kategorie/, typ:/Typ/, vs:/^VS$/, pop:/Poplatek/, cast:/Částka/});
+  const C={kat:150,typ:325,vs:560,pop:670,cast:800, ...c};
+  const colOf=(x)=> x<(C.kat-20)?'datum': x<(C.typ-20)?'kat': x<(C.vs-20)?'typ': x<(C.pop-20)?'vs': x<(C.cast-40)?'pop':'cast';
+
+  const data=lines.filter(l=>!/^Strana\s/.test(l.text)&&!/Raiffeisenbank a\.s\./.test(l.text)
+    &&!/Datum\s+Kategorie/.test(l.text)&&!/Valuta\s+Číslo/.test(l.text)&&!/Kód transakce/.test(l.text));
+  const cells=data.map(l=>{const o={datum:[],kat:[],typ:[],vs:[],cast:[]};
+    l.toks.forEach(t=>{const k=colOf(t.x); if(o[k]) o[k].push(t.s);}); const r={};
+    for(const k in o) r[k]=o[k].join(' ').trim(); return r;});
+
+  const isDate=(s)=>/^\d{1,2}\.\s*\d{1,2}\.\s*\d{4}$/.test(s.replace(/\s+/g,' ').trim());
+  const amt=new RegExp(NUM+'\\s*'+(H.currency||'CZK'));
+  const blocks=[]; let b=null;
+  for(const cell of cells){
+    if(isDate(cell.datum)&&amt.test(cell.cast)){ if(b)blocks.push(b); b={datum:[],kat:[],typ:[],vs:[],cast:[]}; }
+    if(!b) continue; ['datum','kat','typ','vs','cast'].forEach(k=>{if(cell[k])b[k].push(cell[k]);});
+  }
+  if(b)blocks.push(b);
+
+  const items=blocks.map(bl=>{
+    const datum=bl.datum.join(' '), kat=bl.kat.join('\n'), typ=bl.typ.join('\n'),
+          vsCol=bl.vs.join(' '), castCol=bl.cast.join(' ');
+    const dates=(datum.match(/\d{1,2}\.\s*\d{1,2}\.\s*\d{4}/g)||[]).map(parseDate);
+    const kod=(datum.match(/\b\d{9,10}\b/)||[])[0]||'';
+    const amount=(()=>{const m=castCol.match(amt);return m?parseCzNum(m[1]):NaN;})();
+    const vs=(typ.match(/VS[:\s]*(\d+)/)||[])[1]||(vsCol.match(/\b\d{6,10}\b/)||[])[0]||'';
+    const ks=(typ.match(/KS[:\s]*(\d+)/)||[])[1]||(vsCol.match(/\b\d{3,4}\b/)||[])[0]||'';
+    const ss=(typ.match(/SS[:\s]*(\d+)/)||[])[1]||'';
+    const proti=(kat.match(/([\d-]+\/\d{4})/)||[])[1]||'';
+    const katName=kat.replace(/Platba kartou|Platba|Konverze|Poplatek|Úrok|Trvalá platba/g,'')
+                     .replace(/[\d-]+\/\d{4}/,'').replace(/\n/g,' ').replace(/\s+/g,' ').trim();
+    const card=/kartou/i.test(kat)||ks==='1178';
+    let party;
+    if(card){ const note=typ.split('\n').map(s=>s.trim()).filter(Boolean).pop()||'';
+      party=note.replace(/PK:.*?\d{4}/,'').split(';')[0].replace(/\s+/g,' ').trim()||katName; }
+    else if(/Konverze/.test(kat)) party='RB smenarna';
+    else if(/Poplatek|Úrok/.test(kat)) party=(typ.split('\n')[0]||'').trim();
+    else party=katName||(typ.split('\n')[0]||'').trim();
+    return {book:dates[0]||null, valuta:dates[1]||dates[0]||null, kod, proti, party:deacc(party), vs, ks, ss, amount};
+  }).filter(t=>t.kod && !isNaN(t.amount));
+  return {H, items};
+}
+
+/* ========== AIR BANK ========== */
+function parseAirbank(lines, joined){
+  const H={bank:'AIRBANK'};
+  const mAcc=joined.match(/Číslo účtu:\s*([\d-]+)\s*\/\s*(\d+)/); if(mAcc){H.account=mAcc[1];H.bankCode=mAcc[2];}
+  const mName=joined.match(/Název účtu:\s*([^\n]+)/);
+  H.name=mName?mName[1].split(/\s{2,}|Datum výpisu|Měna|Číslo výpisu/)[0].trim():'';
+  const mNo=joined.match(/Číslo výpisu:\s*(\d+)/); H.stmtNo=mNo?+mNo[1]:0;
+  const mP=joined.match(/Období výpisu:\s*(\d+)\.\s*(\d+)\.\s*(\d+)\s*-\s*(\d+)\.\s*(\d+)\.\s*(\d+)/);
+  if(mP){H.from={d:+mP[1],m:+mP[2],y:+mP[3]};H.to={d:+mP[4],m:+mP[5],y:+mP[6]};}
+  const g=(re)=>{const m=joined.match(re);return m?parseCzNum(m[1]):NaN;};
+  H.opening=g(new RegExp('Počáteční zůstatek:\\s*'+NUM));
+  H.closing=g(new RegExp('Konečný zůstatek:\\s*'+NUM));
+  H.income =g(new RegExp('Připsáno na účet:\\s*'+NUM));
+  H.expense=g(new RegExp('Odepsáno z účtu:\\s*'+NUM));
+
+  // Air Bank rows come back from pdf.js as: line A = "<zaúčtování> <typ> <název/detail> <částka> <poplatek>",
+  // line B = "<provedení> <kód transakce> <účet/karta> <detail>", optional line C = cizí měna/zpráva.
+  // Parsing runs on the reconstructed text lines with regex anchors (robust against column geometry).
+  const NOISE=/^Pokračování na straně|^\d\/\d$|^\d{4}\/\d{2}\/\d{2}$|Air Bank a\.s\.|Společnost zapsaná|^Vklad na tomto účtu|^o systému pojištění|^Informační přehled|^Zaúčtování|^Provedení|Kód transakce|debetní karty/;
+  const raw=lines.map(l=>l.text);
+  const owner=(raw[0]||'').trim();
+  const rows=raw.filter(l=>l && !NOISE.test(l));
+  const TYP=/(Platba kartou|Příchozí úhrada|Odchozí úhrada|Jednorázová úhrada|Trvalý příkaz|Poplatek|Úrok)/;
+  const reA=/^(\d{1,2}\.\d{1,2}\.\d{4})\s+(.+?)\s+(-?\d[\d\s]*[.,]\d{2})\s+\d[\d\s]*[.,]\d{2}\s*$/;
+  const reB=/^(\d{1,2}\.\d{1,2}\.\d{4})\s+(\d{10,13})\b\s*(.*)$/;
+
+  const blocks=[]; let cur=null;
+  for(const ln of rows){
+    const mA=ln.match(reA);
+    if(mA){ if(cur)blocks.push(cur); cur={aDate:mA[1], mid:mA[2], amount:parseCzNum(mA[3]), rest:[]}; continue; }
+    if(cur) cur.rest.push(ln);
+  }
+  if(cur)blocks.push(cur);
+
+  const items=blocks.map(b=>{
+    const bLine=b.rest.find(l=>reB.test(l)); const mB=bLine?bLine.match(reB):null;
+    const kod=mB?mB[2]:''; const bRest=mB?mB[3]:'';
+    const full=[b.mid,...b.rest].join(' ');
+    const typ=(b.mid.match(TYP)||[])[0]||'';
+    const card=/kartou/i.test(b.mid)||/\*{2,}/.test(bRest);
+    const proti=(bRest.match(/([\d-]+)\s*\/\s*(\d{4})/)||[]).slice(1).join('/')||'';
+    const vs=(full.match(/VS\s*(\d+)/)||[])[1]||'';
+    const ss=(full.match(/SS\s*(\d+)/)||[])[1]||'';
+    let midRest=b.mid.replace(TYP,'').trim(); let party;
+    if(card){
+      midRest=midRest.replace(owner,'').trim();
+      party=midRest.split(/,| UL\.| Via | Na Porici/)[0].replace(/\s+/g,' ').trim();
+    } else {
+      party=midRest.split(/\s+VS\d|\s+VS\s/)[0].replace(/\s+/g,' ').trim();
+      if(!party){ const msg=(b.rest.find(l=>!reB.test(l)&&!/kurz/.test(l))||'').trim(); party=msg||typ; }
+    }
+    if(party.length>40) party=typ||party.slice(0,40);
+    return {book:parseDate(b.aDate), valuta:(mB?parseDate(mB[1]):null)||parseDate(b.aDate),
+            kod, proti, party:deacc(party), vs, ks:'', ss, amount:b.amount};
+  }).filter(t=>t.kod && !isNaN(t.amount));
+  return {H, items};
+}
+
+/* ========== ČESKÁ SPOŘITELNA ========== */
+function parseCS(lines, joined){
+  const H={bank:'CESKA SPORITELNA'};
+  const mAcc=joined.match(/Číslo účtu\/kód banky:\s*([\d-]+)\s*\/\s*(\d+)/); if(mAcc){H.account=mAcc[1];H.bankCode=mAcc[2];}
+  const mName=joined.match(/Majitel účtu:\s*([^\n]+)/); H.name=mName?mName[1].trim():'';
+  const mNo=joined.match(/Číslo výpisu:\s*(\d+)/); H.stmtNo=mNo?+mNo[1]:0;
+  const mP=joined.match(/Období:\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s*-\s*(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if(mP){H.from={d:+mP[1],m:+mP[2],y:+mP[3]};H.to={d:+mP[4],m:+mP[5],y:+mP[6]};}
+  const g=(re)=>{const m=joined.match(re);return m?parseCzNum(m[1]):NaN;};
+  H.opening=g(new RegExp('Počáteční zůstatek:\\s*'+NUM));
+  H.closing=g(new RegExp('Konečný zůstatek:\\s*'+NUM));
+  H.income =g(new RegExp('Celkem přišlo:\\s*'+NUM));
+  H.expense=Math.abs(g(new RegExp('Celkem odešlo:\\s*'+NUM)));
+
+  const raw=lines.map(l=>l.text.trim()).filter(Boolean);
+  const TYP='(?:Platba kartou|Příchozí úhrada|Odchozí úhrada|Příchozí platba|Odchozí platba|Výběr z bankomatu|Výběr hotovosti|Výběr|Vklad|Poplatek|Úrok|Inkaso|Trvalý příkaz|Jednorázová úhrada|Bezhotovostní [^\\d]*|Převod|SEPA[^\\d]*)';
+  const reStart=new RegExp('^(\\d{1,2}\\.\\d{1,2}\\.\\d{4})\\s+('+TYP+')\\s*(.*?)\\s*([+-]\\s?[\\d\\s]*\\d[.,]\\d{2})\\s*$');
+  const STOP=/^Konečný zůstatek|^KARTA ČÍSLO|^SLUŽBY K ÚČTU|^Počáteční zůstatek|^PŘEHLED POHYBŮ|^VAŠE PŘEDEM|^Zaúčtováno|^Provedeno|^Popis$/;
+  const blocks=[]; let cur=null;
+  for(const ln of raw){
+    const mS=ln.match(reStart);
+    if(mS){ if(cur)blocks.push(cur); cur={date:mS[1], typ:mS[2].trim(), mid:(mS[3]||'').trim(), amt:mS[4], rest:[]}; continue; }
+    if(STOP.test(ln)){ if(cur){blocks.push(cur);cur=null;} continue; }
+    if(cur) cur.rest.push(ln);
+  }
+  if(cur)blocks.push(cur);
+
+  const items=blocks.map(b=>{
+    const amount=parseCzNum(b.amt);
+    const card=/kartou/i.test(b.typ);
+    const full=[b.mid,...b.rest].join(' ');
+    const proti=(full.match(/(\d{1,6}-?\d{2,10})\s*\/\s*(\d{4})/)||[]).slice(1).join('/')||'';
+    const protiNum=proti?proti.split('/')[0].replace(/\D/g,''):'\u0000';
+    const nums=b.rest.map(l=>l.trim()).filter(l=>/^\d{2,10}$/.test(l) && l!==protiNum);
+    let vs='',ks='',ss='';
+    if(card){
+      vs=(b.mid.match(/\d{4,10}/)||[])[0]||'';
+      ks=nums.find(n=>n.length<=4)||'';
+      ss=nums.find(n=>n.length>4 && n!==vs)||'';
+    } else {
+      vs=nums.find(n=>n.length>=4)||'';
+    }
+    let party='';
+    if(card){
+      const desc=b.rest.find(l=>/[A-Za-zÁ-ž]/.test(l)&&!/^\d+$/.test(l)&&!/^CZK\b/.test(l))||'';
+      party=desc.replace(/X{4,}\w*/,'').replace(/d\.tran\.\d{1,2}\.\d{1,2}\.\d{4}/,'').replace(/\bCZ\b/,'').replace(/\s+/g,' ').trim();
+    } else {
+      const nameLine=b.rest.find(l=>/[A-Za-zÁ-ž]/.test(l)&&!STOP.test(l))||'';
+      party=nameLine.replace(/\s+/g,' ').trim();
+    }
+    if(!party) party=b.typ;
+    if(party.length>40) party=party.slice(0,40);
+    return {book:parseDate(b.date), valuta:parseDate(b.date), kod:'', proti, party:deacc(party), vs, ks, ss, amount};
+  }).filter(t=>!isNaN(t.amount));
+  return {H, items};
+}
+
+/* ---------- dispatch ---------- */
+function parseStatement(pages){
+  const lines=flatten(pages);
+  const joined=lines.map(l=>l.text).join('\n');
+  const bank=detectBank(joined);
+  const parser = bank==='airbank'?parseAirbank : bank==='cs'?parseCS : parseRaiffeisen;
+  const {H,items}=parser(lines,joined);
+  return {H, items, bank, debug:joined};
+}
+
+/* ---------- reconcile ---------- */
+function reconcile(H,items){
+  const round=x=>Math.round(x*100)/100;
+  const inc=round(items.filter(t=>t.amount>0).reduce((a,t)=>a+t.amount,0));
+  const exp=round(items.filter(t=>t.amount<0).reduce((a,t)=>a-t.amount,0));
+  const okInc=!isNaN(H.income)&&round(H.income)===inc;
+  const okExp=!isNaN(H.expense)&&round(H.expense)===exp;
+  const okBal=!isNaN(H.opening)&&!isNaN(H.closing)&&round(H.opening+inc-exp)===round(H.closing);
+  return {inc,exp,okInc,okExp,okBal,ok:okInc&&okExp&&okBal};
+}
+
+/* ---------- build GPC ---------- */
+function buildGpc(H,items){
+  const acc=accGpc(H.account||'');
+  const hal=(v)=>zero(Math.round(Math.abs(v)*100),14);
+  const bankName=pad(H.bank||'',14);
+  const l074=()=>{
+    let f='074'+acc+pad(deacc(H.name||''),20)+ddmmrr(H.from);
+    f+=hal(H.opening)+(H.opening<0?'-':'+');
+    f+=hal(H.closing)+(H.closing<0?'-':'+');
+    f+=zero(Math.round((H.expense||0)*100),14)+'0';
+    f+=zero(Math.round((H.income||0)*100),14)+'0';
+    f+=String(H.stmtNo||0).padStart(3,'0')+ddmmrr(H.to)+bankName;
+    return f.slice(0,128).padEnd(128,' ');
+  };
+  const l075=(t)=>{
+    let f='075'+acc+accGpc(t.proti)+zero((t.kod||'').replace(/\D/g,''),13);
+    f+=zero(Math.round(Math.abs(t.amount)*100),12)+(t.amount<0?'1':'2');
+    f+=zero(t.vs||0,10)+zero(t.ks||0,10)+zero(t.ss||0,10);
+    f+=ddmmrr(t.valuta||t.book)+pad(t.party||'',20)+'00203'+ddmmrr(t.book||t.valuta);
+    return f.slice(0,128).padEnd(128,' ');
+  };
+  return [l074(),...items.map(l075)].join('\n')+'\n';
+}
+
+/* ---------- render ---------- */
+const fmt=(n)=>Number(n).toLocaleString('cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2});
+function render(H,items,rc,gpcText,fname,bank){
+  stage(3); const box=$('result'); show(box,true);
+  const label={airbank:'Air Bank', raiffeisen:'Raiffeisenbank', cs:'Česká spořitelna'}[bank]||H.bank;
+  const badge=rc.ok
+    ? '<div class="big">✓ Sedí</div><div class="detail">Příjmy i výdaje odpovídají hlavičce a navazují na konečný zůstatek.</div>'
+    : '<div class="big">✕ Nesouhlasí</div><div class="detail">příjmy '+(rc.okInc?'✓':'✕')+' ('+fmt(rc.inc)+' / '+fmt(H.income)+') · výdaje '+(rc.okExp?'✓':'✕')+' ('+fmt(rc.exp)+' / '+fmt(H.expense)+') · zůstatek '+(rc.okBal?'✓':'✕')+'<br>Zkontroluj rozpoznaný text níže — něco se nenačetlo úplně.</div>';
+  const dd=(d)=>d?String(d.d).padStart(2,'0')+'.'+String(d.m).padStart(2,'0')+'.'+d.y:'—';
+  const rows=items.map(t=>'<tr><td class="date">'+dd(t.book)+'</td><td class="party">'+(t.party||'—')+
+    '</td><td class="sym">'+((''+t.vs).replace(/^0+(?=\d)/,'')||'—')+'</td><td class="sym">'+
+    (t.proti||'—')+'</td><td class="amount '+(t.amount>=0?'pos':'neg')+'">'+(t.amount>=0?'+':'−')+
+    fmt(Math.abs(t.amount))+'</td></tr>').join('');
+  box.innerHTML=
+    '<div class="recon-card '+(rc.ok?'ok':'bad')+'"><div>'+badge+'</div>'+
+      '<div class="cta">'+
+        '<select id="fmt" title="Formát čísla účtu" style="font:inherit;font-size:13px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel)">'+
+          '<option value="vnitrni"'+(GPC_FORMAT==='vnitrni'?' selected':'')+'>Účet: vnitřní (Pohoda)</option>'+
+          '<option value="edicni"'+(GPC_FORMAT==='edicni'?' selected':'')+'>Účet: ediční</option>'+
+        '</select>'+
+        '<button class="btn ok" id="dl">Stáhnout '+fname+'</button></div></div>'+
+    '<div class="head-meta">banka <b>'+label+'</b><span class="bankchip">'+H.bank+'</span> · účet <b>'+
+      (H.account||'?')+'/'+(H.bankCode||'?')+'</b> · '+(H.name||'')+' · výpis č. <b>'+(H.stmtNo??'?')+
+      '</b> · '+(H.from?dd(H.from):'?')+' – '+(H.to?dd(H.to):'?')+' · <b>'+items.length+'</b> pohybů</div>'+
+    '<div class="head-grid">'+
+      '<div class="cell"><div class="lbl">Počáteční zůstatek</div><div class="val">'+fmt(H.opening)+'</div></div>'+
+      '<div class="cell"><div class="lbl">Konečný zůstatek</div><div class="val">'+fmt(H.closing)+'</div></div>'+
+      '<div class="cell"><div class="lbl">Příjmy</div><div class="val kre">'+fmt(H.income)+'</div></div>'+
+      '<div class="cell"><div class="lbl">Výdaje</div><div class="val deb">'+fmt(H.expense)+'</div></div></div>'+
+    '<div class="tablewrap"><table><thead><tr><th>Datum</th><th>Protistrana</th><th class="sym">VS</th>'+
+      '<th class="sym">Protiúčet</th><th class="num">Částka</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  let gpc=gpcText;
+  const download=()=>{
+    const blob=new Blob([toCp1250Bytes(gpc)],{type:'text/plain'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fname; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  };
+  $('fmt').onchange=(e)=>{ GPC_FORMAT=e.target.value; gpc=buildGpc(H,items); };
+  $('dl').onclick=download;
+}
+
+async function handle(file){
+  show($('errbox'),false); show($('result'),false); show($('debugBox'),false);
+  $('status').textContent='Čtu PDF…'; stage(1);
+  try{
+    const buf=await file.arrayBuffer();
+    const pages=await extractRows(buf);
+    $('status').textContent='Rozpoznávám pohyby…'; stage(2);
+    const {H,items,bank,debug}=parseStatement(pages);
+    $('debugPre').textContent=debug; show($('debugBox'),true);
+    if(!items.length) throw new Error('Nenašel jsem žádné pohyby. Otevři „Rozpoznaný text" a pošli mi ho — doladím parser.');
+    const rc=reconcile(H,items);
+    // Výchozí formát čísla účtu podle banky (Pohoda ho čeká per účet):
+    // Air Bank → vnitřní, Raiffeisen → ediční. V UI jde přepnout.
+    GPC_FORMAT = (bank==='raiffeisen'||bank==='cs') ? 'edicni' : 'vnitrni';
+    const period=H.to?H.to.y+'_'+String(H.to.m).padStart(2,'0'):'vypis';
+    const fname='Vypis_'+(H.account||'ucet').replace(/\D/g,'')+'_'+period+'.gpc';
+    const gpcText=buildGpc(H,items);
+    $('status').textContent='';
+    render(H,items,rc,gpcText,fname,bank);
+  }catch(err){
+    stage(1); $('status').textContent='';
+    const e=$('errbox'); e.textContent='Chyba: '+(err.message||err); show(e,true);
+    if($('debugPre').textContent) show($('debugBox'),true);
+  }
+}
+
+$('file').onchange=e=>{ if(e.target.files[0]) handle(e.target.files[0]); };
+['btnOpen','btnOpen2'].forEach(id=>$(id).onclick=()=>$('file').click());
+const dz=$('drop');
+['dragenter','dragover'].forEach(ev=>document.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('hot');}));
+['dragleave','drop'].forEach(ev=>document.addEventListener(ev,e=>{e.preventDefault();if(ev!=='drop')dz.classList.remove('hot');}));
+document.addEventListener('drop',e=>{dz.classList.remove('hot');const f=e.dataTransfer.files[0];if(f&&/pdf$/i.test(f.name))handle(f);});
+</script>
