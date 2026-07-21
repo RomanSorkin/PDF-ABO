@@ -568,8 +568,11 @@ async function handle(file){
     // Výchozí formát čísla účtu podle banky (Pohoda ho čeká per účet):
     // Air Bank → vnitřní, Raiffeisen → ediční. V UI jde přepnout.
     GPC_FORMAT = (bank==='raiffeisen'||bank==='cs') ? 'edicni' : 'vnitrni';
-    const period=H.to?H.to.y+'_'+String(H.to.m).padStart(2,'0'):'vypis';
-    const fname='Vypis_'+(H.account||'ucet').replace(/\D/g,'')+'_'+period+'.gpc';
+    // Název souboru: <číslo účtu>-<rok-měsíc>-<měna>, ať účetní pozná, o jaký výpis jde
+    const per=H.from||H.to;
+    const mstr=per?per.y+'-'+String(per.m).padStart(2,'0'):'vypis';
+    const cur=(H.currency||'CZK').replace(/[^A-Za-z]/g,'').toUpperCase()||'CZK';
+    const fname=(H.account||'ucet').replace(/\D/g,'')+'-'+mstr+'-'+cur+'.gpc';
     const gpcText=buildGpc(H,items);
     $('status').textContent='';
     render(H,items,rc,gpcText,fname,bank);
