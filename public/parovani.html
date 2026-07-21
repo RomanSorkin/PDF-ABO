@@ -104,7 +104,14 @@
   .pill.g{background:#D2E9EF;color:var(--gopay)}
   .hidden{display:none!important}
   .hint{color:var(--muted);font-size:12.5px;margin:16px 0}
-  @media(max-width:820px){ .slots{grid-template-columns:1fr} td.party{max-width:110px} }</style>
+  @media(max-width:820px){ .slots{grid-template-columns:1fr} td.party{max-width:110px} }
+  #printview{display:none}
+  @media print{
+    body *{visibility:hidden}
+    #printview{display:block!important;visibility:visible;position:absolute;left:0;top:0;width:100%}
+    #printview *{visibility:visible}
+    @page{margin:12mm}
+  }</style>
 
 <header class="top">
   <div class="wrap">
@@ -157,6 +164,8 @@
         <button data-f="in">Jen příjmy</button>
         <button data-f="unmatched">Nespárované</button>
       </span>
+      <button class="btn sm" id="printBtn" style="margin-left:6px">Tisk / PDF</button>
+      <button class="btn sm" id="xlsBtn">Excel pro účetní</button>
     </div>
     <div class="tablewrap">
       <table>
@@ -168,6 +177,8 @@
       </table>
     </div>
   </div>
+
+  <div id="printview" aria-hidden="true"></div>
 </div>
 
 <script>
@@ -181,6 +192,8 @@ function dispDate(ddmmrr){ if(!/^\d{6}$/.test(ddmmrr))return ddmmrr||''; return 
 function parseGpc(bytes){
   const text=new TextDecoder('windows-1250').decode(bytes);
   const lines=text.split(/\r\n|\r|\n/).filter(l=>l.length>=100);
+  const h=lines.find(l=>l.slice(0,3)==='074');
+  GPC_HDR = h ? { account:stripLead(h.slice(3,19))||h.slice(3,19).trim(), name:h.slice(19,39).trim() } : {};
   const mov=lines.filter(l=>l.slice(0,3)==='075').map((r,i)=>({
     i, amount:(parseInt(r.slice(48,60),10)||0)/100*(r[60]==='2'?1:-1),
     vs:stripLead(r.slice(61,71)), ks:stripLead(r.slice(71,81)), ss:stripLead(r.slice(81,91)),
@@ -239,7 +252,7 @@ function parseGoPayClearing(text){
 }
 
 /* ---------- state ---------- */
-let MOV=null, INV=null, GOPAY=null, filter='all';
+let MOV=null, INV=null, GOPAY=null, filter='all', GPC_HDR={};
 
 function matchAll(){
   if(!MOV) return;
@@ -313,6 +326,61 @@ function render(){
   const cz=$('cZas'); if(cz) cz.textContent=cZ;
   const cg=$('cGopay'); if(cg) cg.textContent=cG;
   $('cDocs').textContent=docsMatched||0; $('cDocsAll').textContent=INV?INV.list.length:0;
+}
+
+/* ---------- export pro účetní: tisk/PDF + formátovaný Excel ---------- */
+const STAV={
+  m:{label:'Platba od zákazníka', bg:'#E7F6EE', desc:'Příchozí platba spárovaná s vydaným dokladem podle variabilního symbolu; částka souhlasí.'},
+  w:{label:'VS sedí / částka nesouhlasí', bg:'#FCF3D9', desc:'VS odpovídá vydanému dokladu, ale částka nesouhlasí – nutno zkontrolovat.'},
+  z:{label:'Vyúčtování Zásilkovna', bg:'#E7F0FB', desc:'Hromadné vyúčtování od Zásilkovny (rozpad zásilek/dobírek je v aplikaci po rozkliknutí).'},
+  g:{label:'Vyúčtování GoPay', bg:'#EAF7F4', desc:'Hromadné vyúčtování z brány GoPay (jednotlivé platby a poplatek jsou v aplikaci).'},
+  u:{label:'Nespárováno – příjem', bg:'#FBEAE7', desc:'Příchozí platba, ke které se nenašel odpovídající vydaný doklad.'},
+  o:{label:'Odchozí platba', bg:'#F4F4F6', desc:'Odchozí platba (výdaj) – nepáruje se na vydané doklady.'}
+};
+function stavKey(m){ return m.state==='m'?'m':m.state==='w'?'w':m.state==='z'?'z':m.state==='g'?'g':(m.amount>0?'u':'o'); }
+function docText(m){
+  if(m.match) return 'č. '+(m.match.number||'?')+' · '+(m.match.name||'')+' · '+fmt(m.match.gross)+(m.state==='w'?' (≠ částka)':'');
+  if(m.state==='z') return 'Zásilkovna · '+m.zas.count+' zásilek'+(m.zas.codSum!=null?' · dobírky '+fmt(m.zas.codSum):'');
+  if(m.state==='g') return 'GoPay · '+m.gopay.movements.length+' plateb · poplatek '+fmt(m.gopay.amountFee);
+  return '—';
+}
+function exportMeta(){
+  const dates=MOV.map(m=>m.book).filter(Boolean).slice().sort();
+  const per = dates.length? dispDate(dates[0])+' – '+dispDate(dates[dates.length-1]) : '';
+  return {account:GPC_HDR.account||'', name:GPC_HDR.name||'', period:per,
+    docs:INV?MOV.filter(m=>m.match&&m.state==='m').length:0, docsAll:INV?INV.list.length:0};
+}
+function exportTableHtml(){
+  const head=['Datum','VS','Protistrana','Částka','Stav','Spárovaný doklad','Vysvětlení'];
+  const th=head.map(h=>'<th style="border:1px solid #999;background:#33415A;color:#fff;padding:5px 7px;text-align:left;font-size:12px">'+escH(h)+'</th>').join('');
+  const trs=MOV.map(m=>{
+    const k=stavKey(m), bg=STAV[k].bg;
+    const cells=[dispDate(m.book), m.vs||'', m.party||'', (m.amount>=0?'':'−')+fmt(Math.abs(m.amount)), STAV[k].label, docText(m), m.vysvetleni||''];
+    return '<tr>'+cells.map((c,i)=>'<td style="border:1px solid #ccc;background:'+bg+';padding:4px 7px;font-size:12px;'+(i===3?'text-align:right':'')+'">'+escH(c)+'</td>').join('')+'</tr>';
+  }).join('');
+  return '<table style="border-collapse:collapse;width:100%"><thead><tr>'+th+'</tr></thead><tbody>'+trs+'</tbody></table>';
+}
+function exportHeaderHtml(){
+  const meta=exportMeta();
+  const legend=Object.keys(STAV).map(k=>'<tr><td style="border:1px solid #ddd;padding:3px 7px;background:'+STAV[k].bg+';font-size:11px;white-space:nowrap"><b>'+escH(STAV[k].label)+'</b></td><td style="border:1px solid #ddd;padding:3px 7px;font-size:11px">'+escH(STAV[k].desc)+'</td></tr>').join('');
+  return '<div style="font-family:Arial,sans-serif;color:#111">'+
+    '<h2 style="margin:0 0 2px">Párování plateb k bankovnímu výpisu</h2>'+
+    '<div style="color:#555;font-size:12px;margin-bottom:8px">'+(meta.account?'Účet: <b>'+escH(meta.account)+'</b> · ':'')+(meta.name?escH(meta.name)+' · ':'')+'Období: <b>'+escH(meta.period||'—')+'</b> · Pohybů: <b>'+MOV.length+'</b> · Doklady spárováno: <b>'+meta.docs+'/'+meta.docsAll+'</b></div>'+
+    '<div style="font-size:12px;margin-bottom:4px"><b>Vysvětlivky stavů (pro účetní):</b></div>'+
+    '<table style="border-collapse:collapse;margin:0 0 14px"><tbody>'+legend+'</tbody></table></div>';
+}
+function printExport(){
+  if(!MOV){ alert('Nejdřív nahraj GPC výpis.'); return; }
+  $('printview').innerHTML=exportHeaderHtml()+exportTableHtml();
+  window.print();
+}
+function excelExport(){
+  if(!MOV){ alert('Nejdřív nahraj GPC výpis.'); return; }
+  const html='<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body>'+exportHeaderHtml()+exportTableHtml()+'</body></html>';
+  const blob=new Blob(['\ufeff'+html],{type:'application/vnd.ms-excel'});
+  const meta=exportMeta(), tag=(meta.account||'parovani')+(meta.period?('_'+meta.period.replace(/\D/g,'').slice(0,8)):'');
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='parovani-'+tag+'.xls'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
 }
 
 /* expandable Zásilkovna breakdown */
@@ -443,6 +511,8 @@ $('filter').querySelectorAll('button').forEach(b=>b.onclick=()=>{
   $('filter').querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',x===b));
   render();
 });
+$('printBtn').onclick=printExport;
+$('xlsBtn').onclick=excelExport;
 
 /* ================= Zásilkovna API (přes backend proxy) ================= */
 let ZAS_OK=false, ZAS_TOKEN_REQ=false, ZAS_TOKEN='', ZAS_ACCOUNTS=[];
