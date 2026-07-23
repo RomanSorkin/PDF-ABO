@@ -258,10 +258,14 @@ function rbLine(lines, H){
     if(cur) cur.rest.push(ln);
   }
   if(cur)blocks.push(cur);
-  return blocks.map(b=>{
+  const items=blocks.map(b=>{
     const amount=parseCzNum(b.amt);
+    // sloupec "Poplatek": částka s desetinami těsně před hlavní částkou (např. "… E2E… -53.09" | částka -2 767.62)
+    let mid=b.mid, fee=0;
+    const fm=mid.match(/(-?\d{1,3}(?:[ \u00a0]\d{3})*[.,]\d{2})\s*$/);
+    if(fm){ fee=parseCzNum(fm[1]); mid=mid.slice(0,fm.index).trim(); }
     const restJoined=b.rest.join(' ');
-    const block=[b.mid,...b.rest].join(' ');
+    const block=[mid,...b.rest].join(' ');
     const kod=(b.rest.map(l=>(l.match(/^(\d{9,10})\b/)||[])[1]).find(Boolean))||(block.match(/\b(9\d{8,9})\b/)||[])[1]||'';
     const proti=(block.match(/\b((?:\d{1,6}-)?\d{4,10})\s*\/\s*(\d{4})\b/)||[]).slice(1).join('/')||'';
     const protiNum=proti?proti.split('/')[0].replace(/\D/g,''):'\u0000';
@@ -271,22 +275,33 @@ function rbLine(lines, H){
     const vs=((block.match(/VS:?\s*(\d{4,10})/)||[])[1])
              || ((block.match(/\b\d{6,10}\b/g)||[]).filter(n=>n!==kod&&n!==protiNum&&n!==acc)[0]) || '';
     const valutaDate=(restJoined.match(/\d{1,2}\.\s*\d{1,2}\.\s*\d{4}/)||[])[0];
-    const card=/kartou/i.test(b.mid)||ks==='1178';
-    const konv=/Konverze|směnárna/i.test(b.mid);
+    const card=/kartou/i.test(mid)||ks==='1178';
+    const konv=/Konverze|směnárna/i.test(mid);
     let party='';
     if(konv) party='RB smenarna';
     else if(card){
       const note=b.rest.find(l=>/;|EQUIPMENT|\.com|\.cz|\.nl|\.eu|SUBSCR/i.test(l))||'';
       party=note.replace(/PK:.*?5798/i,'').split(';')[0].replace(/\s+/g,' ').trim();
     } else {
-      const nameLine=b.rest.find(l=>/[A-Za-zÁ-ž]/.test(l)&&!/^KS:|^PK:|INVOICE|SEPA|úhrada|Zpráva|Poznámka/i.test(l)&&!/^\d/.test(l))||'';
-      party=nameLine.replace(/\s+/g,' ').trim();
+      // jméno protistrany: očisti řádek (datum, kód transakce, KS:/SS:/VS:/PK:) a vezmi úvodní slova BEZ číslic
+      const clean=l=>l.replace(/^\d{1,2}\.\s*\d{1,2}\.\s*\d{4}\s*/,'').replace(/^\d{9,10}\s*/,'').replace(/\b(KS|SS|VS|PK):\s*\S*/gi,'').trim();
+      const nameOf=l=>{ const out=[]; for(const t of l.split(/\s+/)){ if(!t||/\d/.test(t)) break; out.push(t); }
+        return out.join(' ').replace(/\s+(Order|Proforma|INVOICE|Faktura)\b.*$/i,'').trim(); };
+      party=b.rest.map(l=>nameOf(clean(l))).find(n=>(n.match(/[A-Za-zÁ-ž]/g)||[]).length>=3)||'';
     }
-    if(!party) party=b.mid.replace(/Platba kartou|Platba na internetu[^]*|Platba|Konverze|Zahraniční platba|Odchozí[^]*|Příchozí[^]*|Jednorázová úhrada|Trvalý příkaz|Poplatek|Úrok|RB směnárna/gi,'').replace(/[\d].*/,'').replace(/\s+/g,' ').trim();
-    if(!party) party=b.mid.split(/\s+/).slice(0,3).join(' ');
+    if(!party) party=mid.replace(/Platba kartou|Platba na internetu[^]*|Platba|Konverze|Zahraniční platba|Odchozí[^]*|Příchozí[^]*|Jednorázová úhrada|Trvalý příkaz|Poplatek|Úrok|RB směnárna/gi,'').replace(/[\d].*/,'').replace(/\s+/g,' ').trim();
+    if(!party) party=mid.split(/\s+/).slice(0,3).join(' ');
     if(party.length>40) party=party.slice(0,40);
-    return {book:parseDate(b.date), valuta:valutaDate?parseDate(valutaDate):parseDate(b.date), kod, proti, party:deacc(party), vs, ks, ss, amount};
+    return {book:parseDate(b.date), valuta:valutaDate?parseDate(valutaDate):parseDate(b.date), kod, proti, party:deacc(party), vs, ks, ss, amount, fee};
   }).filter(t=>!isNaN(t.amount));
+  // poplatek banky = samostatný pohyb (banka ho počítá do výdajů zvlášť)
+  const out=[];
+  for(const t of items){
+    out.push(t);
+    if(t.fee && Math.abs(t.fee)>0.005)
+      out.push({book:t.book, valuta:t.valuta, kod:'', proti:'', party:'RB poplatek', vs:'', ks:'', ss:'', amount:-Math.abs(t.fee), fee:0});
+  }
+  return out;
 }
 
 // Původní sloupcový parser (spolehlivý na CZK) — fallback.
