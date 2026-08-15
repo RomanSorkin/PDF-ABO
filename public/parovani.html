@@ -166,6 +166,9 @@
       </span>
       <button class="btn sm" id="printBtn" style="margin-left:6px">Tisk / PDF</button>
       <button class="btn sm" id="xlsBtn">Excel pro účetní</button>
+      <button class="btn sm" id="explSave">Uložit vysvětlivky</button>
+      <button class="btn sm" id="podkladyBtn">Stáhnout podklady</button>
+      <span id="podkladyProg" class="muted" style="font-size:12px"></span>
     </div>
     <div class="tablewrap">
       <table>
@@ -376,11 +379,79 @@ function printExport(){
 }
 function excelExport(){
   if(!MOV){ alert('Nejdřív nahraj GPC výpis.'); return; }
-  const html='<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body>'+exportHeaderHtml()+exportTableHtml()+'</body></html>';
-  const blob=new Blob(['\ufeff'+html],{type:'application/vnd.ms-excel'});
+  const blob=excelBlob();
   const meta=exportMeta(), tag=(meta.account||'parovani')+(meta.period?('_'+meta.period.replace(/\D/g,'').slice(0,8)):'');
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='parovani-'+tag+'.xls'; a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+}
+function excelBlob(){
+  const html='<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body>'+exportHeaderHtml()+exportTableHtml()+'</body></html>';
+  return new Blob(['\ufeff'+html],{type:'application/vnd.ms-excel'});
+}
+
+/* ---------- uložení vysvětlivek (localStorage, klíč = účet + podpis pohybu) ---------- */
+const movSig=m=>[m.book,m.vs,Math.round(m.amount*100),m.i].join('|');
+const explKey=()=>'par_expl:'+(GPC_HDR.account||'x');
+function saveExpl(){
+  if(!MOV){ alert('Nejdřív nahraj GPC výpis.'); return; }
+  const map={}; let n=0;
+  MOV.forEach(m=>{ if((m.vysvetleni||'').trim()){ map[movSig(m)]=m.vysvetleni.trim(); n++; } });
+  try{ localStorage.setItem(explKey(), JSON.stringify(map)); }
+  catch(e){ alert('Uložení selhalo: '+e.message); return; }
+  $('podkladyProg').textContent='Vysvětlivky uloženy ('+n+') — po příštím nahrání stejného výpisu se doplní samy.';
+}
+function restoreExpl(){
+  try{
+    const map=JSON.parse(localStorage.getItem(explKey())||'{}');
+    let n=0; MOV.forEach(m=>{ const v=map[movSig(m)]; if(v && !(m.vysvetleni||'').trim()){ m.vysvetleni=v; n++; } });
+    return n;
+  }catch(e){ return 0; }
+}
+
+/* ---------- Stáhnout podklady: Excel + rozpisy Zásilkovny ve všech formátech ---------- */
+function loadJSZip(){
+  return new Promise((res,rej)=>{
+    if(window.JSZip) return res();
+    const s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+    s.onload=()=>res(); s.onerror=()=>rej(new Error('JSZip se nenačetl (zkontroluj připojení)'));
+    document.head.appendChild(s);
+  });
+}
+async function podklady(){
+  if(!MOV){ alert('Nejdřív nahraj GPC výpis.'); return; }
+  const btn=$('podkladyBtn'), prog=$('podkladyProg');
+  btn.disabled=true;
+  try{
+    await loadJSZip();
+    const zip=new JSZip();
+    const meta=exportMeta(), tag=(meta.account||'parovani')+(meta.period?('_'+meta.period.replace(/\D/g,'').slice(0,8)):'');
+    // 1) vysvětlení pro účetní (Excel)
+    zip.file('vysvetleni-pro-ucetni-'+tag+'.xls', excelBlob());
+    // 2) spárované Zásilkovny ve všech formátech (rozpis CSV, Pohoda CSV, PDF faktury)
+    const zs=MOV.filter(m=>m.state==='z');
+    const errs=[]; let done=0;
+    for(const m of zs){
+      done++; prog.textContent='Zásilkovna '+done+'/'+zs.length+' (VS '+m.vs+')…';
+      const acc=(m.zas&&m.zas.account)||'';
+      const dir=zip.folder('zasilkovna_'+m.vs);
+      const grab=async(path,params,fname)=>{
+        try{ const r=await zasApi(path, acc?Object.assign({account:acc},params):params);
+          if(!r.ok) throw 0; dir.file(fname, await r.arrayBuffer()); return true;
+        }catch(e){ return false; }
+      };
+      const ok1=await grab('/api/zasilkovna/packet',{number:m.vs,version:5,lang:'cs'},'rozpis_'+m.vs+'.csv');
+      const ok2=await grab('/api/zasilkovna/packet-pohoda',{var_symbol:m.vs,lang:'cs'},'pohoda_'+m.vs+'.csv');
+      const ok3=await grab('/api/zasilkovna/pdf',{number:m.vs},'Faktura_'+m.vs+'.pdf');
+      if(!ok1&&!ok2&&!ok3) errs.push(m.vs);
+    }
+    prog.textContent='balím zip…';
+    const blob=await zip.generateAsync({type:'blob'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='podklady-'+tag+'.zip'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+    prog.textContent='Podklady staženy: Excel + '+zs.length+'× Zásilkovna'+(errs.length?' · nepovedlo se: VS '+errs.join(', '):'');
+  }catch(e){ alert('Podklady se nepodařilo připravit: '+e.message); prog.textContent=''; }
+  finally{ btn.disabled=false; }
 }
 
 /* expandable Zásilkovna breakdown */
@@ -453,8 +524,10 @@ function fail(msg){ const e=$('errbox'); e.textContent='Chyba: '+msg; show(e,tru
 function readGpc(file){
   const rd=new FileReader();
   rd.onload=e=>{ try{ MOV=parseGpc(new Uint8Array(e.target.result)); show($('errbox'),false);
+      const nR=restoreExpl();
       $('slotGpc').classList.add('done'); $('gpcFn').textContent=file.name;
       $('gpcNum').textContent=MOV.length+' pohybů'; render();
+      if(nR) $('podkladyProg').textContent='Obnoveno '+nR+' uložených vysvětlivek.';
     }catch(err){ fail(err.message); } };
   rd.readAsArrayBuffer(file);
 }
@@ -513,6 +586,8 @@ $('filter').querySelectorAll('button').forEach(b=>b.onclick=()=>{
 });
 $('printBtn').onclick=printExport;
 $('xlsBtn').onclick=excelExport;
+$('explSave').onclick=saveExpl;
+$('podkladyBtn').onclick=podklady;
 
 /* ================= Zásilkovna API (přes backend proxy) ================= */
 let ZAS_OK=false, ZAS_TOKEN_REQ=false, ZAS_TOKEN='', ZAS_ACCOUNTS=[];
