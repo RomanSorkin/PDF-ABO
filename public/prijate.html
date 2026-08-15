@@ -50,6 +50,9 @@ label .pick.has-anchor{border-color:var(--ok);color:var(--ok)}
 #pdfOverlay{cursor:crosshair}
 #selRect{position:absolute;border:1.5px solid var(--acc);background:rgba(91,140,255,.18);pointer-events:none;z-index:5}
 .tokglow{position:absolute;background:rgba(47,191,113,.16);outline:1px solid rgba(47,191,113,.55);pointer-events:none;z-index:4}
+.anchbox{position:absolute;border:1.5px dashed var(--ok);background:rgba(47,191,113,.07);pointer-events:none;z-index:3;border-radius:3px}
+.anchbox>span{position:absolute;left:-1px;top:-16px;background:var(--ok);color:#08130c;font-size:10px;line-height:14px;padding:0 5px;border-radius:3px;white-space:nowrap}
+#anchToggle.on{border-color:var(--ok);color:var(--ok)}
 </style>
 </head>
 <body>
@@ -80,7 +83,8 @@ label .pick.has-anchor{border-color:var(--ok);color:var(--ok)}
       <div class="card" style="padding:10px">
         <div class="row" style="justify-content:space-between;margin-bottom:8px">
           <div class="sechead" style="margin:0">Náhled PDF</div>
-          <div class="row"><button class="btn" id="pgPrev" style="padding:4px 10px">‹</button>
+          <div class="row"><button class="btn" id="anchToggle" style="padding:4px 10px;font-size:12px" title="Zobrazit/skrýt naučené kotvy v náhledu">Kotvy</button>
+            <button class="btn" id="pgPrev" style="padding:4px 10px">‹</button>
             <span id="pgInfo" class="muted"></span>
             <button class="btn" id="pgNext" style="padding:4px 10px">›</button></div>
         </div>
@@ -153,7 +157,7 @@ function applyAnchors(f){
   for(const field in t.anchors){
     const text=tokensInNormBox(t.anchors[field].page, t.anchors[field].box); if(!text) continue;
     if(field==='__vat__'){ const rows=extractVatFromText(text); if(rows.length){f.vat=rows;f._anchored[field]=true;n++;} }
-    else if(field==='total'){ f.total=parseCzNum(text); f._anchored[field]=true; n++; }
+    else if(field==='total'||field==='rounding'){ f[field]=parseCzNum(text); f._anchored[field]=true; n++; }
     else { f[field]=text; if(field==='supDic')f.foreign=!!(f.supDic&&!/^CZ/.test(f.supDic)); if(field==='supIco')f.supIco=text.replace(/\s/g,''); f._anchored[field]=true; n++; }
   }
   return n;
@@ -178,7 +182,7 @@ function extractInvoice(lines){
   const NAMERE=/([A-ZÁ-Ž][A-Za-zÁ-ž0-9.&\- ]{1,40}?(?:s\.\s?r\.\s?o\.?|a\.\s?s\.?(?=\s|,|$)|spol\.\s*s\s*r\.?\s*o\.?|s\.p\.|v\.o\.s\.))/g;
   const pickName=txt=>([...txt.matchAll(NAMERE)].map(m=>m[1].replace(/\s+/g,' ').trim())
     .filter(t=>!/Roman|Sorkin/i.test(t) && t.length>4 && !/Raiffeisen|spo[řr]iteln|Komer[čc]n[íi] banka|[ČC]SOB|Fio|Air Bank|MONETA|UniCredit|\bbanka\b/i.test(t))[0]||'');
-  const di=joined.search(/Dodavatel/i);
+  const di=joined.search(/Dodavatel|Prod[áa]vaj[íi]c[íi]/i);
   f.supName = (di>=0 ? pickName(joined.slice(di, di+300)) : '') || pickName(joined);
 
   // --- číslo dokladu (i když je "č." na dalším řádku; ne zálohová "Fa č.") ---
@@ -194,7 +198,7 @@ function extractInvoice(lines){
   // --- datumy: přímé "štítek: datum" ---
   const D=re=>{const m=joined.match(re);return m?m[1]:'';};
   f.vyst=D(new RegExp('Datum vystaven[íi]\\s*:?\\s*'+DATE,'i'));
-  f.duzp=D(new RegExp('(?:zdaniteln[éeě]ho pln[ěe]n[íi]|uskute[čc]n[ěe]n[íi] pln[ěe]n[íi]|DUZP)\\s*:?\\s*'+DATE,'i'));
+  f.duzp=D(new RegExp('(?:zdaniteln[éeě]ho pln[ěe]n[íi]|uskute[čc]n[ěe]n[íi] pln[ěe]n[íi]|uskut\\.?\\s*zda[ňn]\\.?\\s*pln[ěe]n[íi]|DUZP)\\s*:?\\s*'+DATE,'i'));
   f.splat=D(new RegExp('Datum splatnosti\\s*:?\\s*'+DATE,'i'));
   // fallback: trojice datumů v jednom řádku (hlavička "vystavení | plnění | splatnost")
   if(!f.vyst||!f.duzp||!f.splat){
@@ -213,17 +217,22 @@ function extractInvoice(lines){
   if(f.iban) f.account=f.account||f.iban;
 
   // --- forma úhrady ---
-  f.pay=/kartou/i.test(joined)?'Kartou':(/[Pp][řr][íi]kazem/.test(joined)?'Příkazem':'Příkazem');
+  f.pay=/kartou|Apple Pay|Google Pay|GPay/i.test(joined)?'Kartou':'Příkazem';
 
   // --- rekapitulace DPH ---
   f.vat=[]; f.total=NaN;
-  const iRec=joined.search(/Rekapitulace DPH/i);
+  const iRec=joined.search(/Rekapitulace DPH|Vy[čc][íi]slen[íi] DPH/i);
   const recap = iRec>=0 ? joined.slice(iRec) : '';
   const AMT='(-?\\d[\\d \\u00a0]*[.,]\\d{2})';
   if(recap){
-    // řádky "<základ> <sazba> <DPH> [<celkem>]" i "<sazba>% <základ> <DPH>"
-    const re1=new RegExp(AMT+'\\s+(0|10|12|15|21)\\s*%?\\s+'+AMT,'g'); let m;
+    // řádky "<základ> <sazba> <DPH>" i "<sazba> % <základ> <DPH>" (Alza)
+    let m;
+    const re1=new RegExp(AMT+'\\s+(0|10|12|15|21)\\s*%?\\s+'+AMT,'g');
     while((m=re1.exec(recap))){ const base=parseCzNum(m[1]),rate=+m[2],dph=parseCzNum(m[3]); if((base||dph)) f.vat.push({base:r2(base),rate,dph:r2(dph)}); }
+    if(!f.vat.length){
+      const re1b=new RegExp('(0|10|12|15|21)\\s*%\\s+'+AMT+'\\s+'+AMT,'g');
+      while((m=re1b.exec(recap))){ const rate=+m[1],base=parseCzNum(m[2]),dph=parseCzNum(m[3]); if((base||dph)) f.vat.push({base:r2(base),rate,dph:r2(dph)}); }
+    }
   }
   if(!f.vat.length){
     // fallback bez tabulky: "Celkem bez DPH", "DPH", sazba z "21 %"
@@ -240,9 +249,16 @@ function extractInvoice(lines){
       if(base>0&&dph>=0&&Math.abs(base*rate/100-dph)<Math.max(0.5,base*0.01)){ agg[rate]=agg[rate]||{base:0,dph:0}; agg[rate].base+=base; agg[rate].dph+=dph; } }
     for(const r in agg) f.vat.push({base:r2(agg[r].base),rate:+r,dph:r2(agg[r].dph)});
   }
-  // celková částka k úhradě
+  // zaokrouhlení (např. Alza: -0,31 Kč)
+  f.rounding=parseCzNum((joined.match(new RegExp('Zaokrouhlen[íi]\\s*:?\\s*'+AMT,'i'))||[])[1]);
+  if(isNaN(f.rounding)) f.rounding=0;
+  // celková částka k úhradě (přednost: K ÚHRADĚ; jinak poslední "Celkem: … Kč" — finální po zaokrouhlení)
   f.total=parseCzNum((joined.match(new RegExp('(?:CELKEM K [ÚU]HRAD[ĚE]|K [úu]hrad[ěe] celkem[^\\d]*K[čc]?|Celkem s DPH|Celkem\\s*K[čc])\\s*:?\\s*'+AMT,'i'))||[])[1]);
-  if(isNaN(f.total)&&f.vat.length) f.total=r2(f.vat.reduce((a,v)=>a+v.base+v.dph,0));
+  if(isNaN(f.total)){
+    const alls=[...joined.matchAll(new RegExp('Celkem\\s*:?\\s*'+AMT+'\\s*K[čc]','gi'))];
+    if(alls.length) f.total=parseCzNum(alls[alls.length-1][1]);
+  }
+  if(isNaN(f.total)&&f.vat.length) f.total=r2(f.vat.reduce((a,v)=>a+v.base+v.dph,0)+f.rounding);
 
   // splatnost může chybět (uhrazeno) → default DUZP/vystavení
   if(!f.splat) f.splat=f.duzp||f.vyst;
@@ -275,7 +291,7 @@ function validate(f){
     sumBase+=row.base; sumDph+=row.dph;
     if(row.rate>0 && Math.abs(r2(row.base*row.rate/100)-row.dph)>0.02) dphMathOk=false;
   }
-  const sumTotal=r2(sumBase+sumDph);
+  const sumTotal=r2(sumBase+sumDph+(+f.rounding||0));
   v.dphMathOk=dphMathOk;
   v.totalOk = !isNaN(f.total) && Math.abs(sumTotal-r2(f.total))<0.02;
   v.dphState = (dphMathOk && v.totalOk)?'ok':'warn';
@@ -288,9 +304,12 @@ function validate(f){
 /* ---------- Pohoda XML (přijatá faktura, syntetická položka na sazbu) ---------- */
 function extractVatFromText(txt){
   const AMT='(-?\\d[\\d \\u00a0]*[.,]\\d{2})'; const rows=[];
-  const agg={}; const re=new RegExp(AMT+'\\s+(0|10|12|15|21)\\s*%?\\s+'+AMT,'g'); let m;
-  while((m=re.exec(txt))){ const base=parseCzNum(m[1]),rate=+m[2],dph=parseCzNum(m[3]);
-    if(base>0&&Math.abs(base*rate/100-dph)<Math.max(0.5,base*0.01)){ agg[rate]=agg[rate]||{base:0,dph:0}; agg[rate].base+=base; agg[rate].dph+=dph; } }
+  const agg={}; const add=(base,rate,dph)=>{ if(base>0&&Math.abs(base*rate/100-dph)<Math.max(0.5,base*0.01)){ agg[rate]=agg[rate]||{base:0,dph:0}; agg[rate].base+=base; agg[rate].dph+=dph; } };
+  let m;
+  const re1=new RegExp(AMT+'\\s+(0|10|12|15|21)\\s*%?\\s+'+AMT,'g');          // základ sazba DPH
+  while((m=re1.exec(txt))) add(parseCzNum(m[1]),+m[2],parseCzNum(m[3]));
+  const re2=new RegExp('(0|10|12|15|21)\\s*%\\s+'+AMT+'\\s+'+AMT,'g');        // sazba % základ DPH (Alza)
+  while((m=re2.exec(txt))) add(parseCzNum(m[2]),+m[1],parseCzNum(m[3]));
   for(const r in agg) rows.push({base:r2(agg[r].base),rate:+r,dph:r2(agg[r].dph)});
   if(!rows.length){
     const base=parseCzNum((txt.match(new RegExp('Celkem bez DPH\\s*'+AMT,'i'))||[])[1]);
@@ -316,7 +335,20 @@ function buildPohodaXml(f){
           </inv:homeCurrency>
           <inv:accounting><typ:ids>${xmlesc(predk)}</typ:ids></inv:accounting>
           <inv:classificationVAT><typ:ids>${xmlesc(cleneni)}</typ:ids></inv:classificationVAT>
-        </inv:invoiceItem>`).join('\n');
+        </inv:invoiceItem>`).join('\n')
+    + ((+f.rounding && Math.abs(f.rounding)>0.001) ? `
+        <inv:invoiceItem>
+          <inv:text>Zaokrouhlení</inv:text>
+          <inv:quantity>1</inv:quantity>
+          <inv:payVAT>false</inv:payVAT>
+          <inv:rateVAT>none</inv:rateVAT>
+          <inv:homeCurrency>
+            <typ:unitPrice>${gnum(f.rounding)}</typ:unitPrice>
+            <typ:price>${gnum(f.rounding)}</typ:price>
+            <typ:priceVAT>0</typ:priceVAT>
+          </inv:homeCurrency>
+          <inv:accounting><typ:ids>${xmlesc(predk)}</typ:ids></inv:accounting>
+        </inv:invoiceItem>` : '');
   const addr=`          <typ:company>${xmlesc(f.supName||'')}</typ:company>
             <typ:ico>${xmlesc((f.supIco||'').replace(/\D/g,''))}</typ:ico>${f.supDic?`
             <typ:dic>${xmlesc(f.supDic)}</typ:dic>`:''}${f.supStreet?`
@@ -422,7 +454,8 @@ function render(){
     <table class="vat"><thead><tr><th>Základ</th><th>Sazba %</th><th>DPH</th><th>Celkem</th></tr></thead>
     <tbody>${vatRows}</tbody></table>
     <div class="row" style="justify-content:space-between;margin-top:10px">
-      <div class="muted">Součet: základ <b>${gnum(v.sumBase)}</b> + DPH <b>${gnum(v.sumDph)}</b> = <b>${gnum(v.sumTotal)}</b></div>
+      <div class="muted">Součet: základ <b>${gnum(v.sumBase)}</b> + DPH <b>${gnum(v.sumDph)}</b>${(+F.rounding)?' + zaokr. <b>'+gnum(F.rounding)+'</b>':''} = <b>${gnum(v.sumTotal)}</b></div>
+      <div class="fld" style="width:130px">${fld('Zaokrouhlení','rounding',gnum(F.rounding||0),null,{num:1})}</div>
       <div class="fld" style="width:170px">${fld('Celkem k úhradě','total',gnum(F.total),v.totalOk?'ok':'warn',{num:1})}</div>
     </div>
   </div>
@@ -545,6 +578,30 @@ async function renderPreview(pageNum){
   });
   $('pgInfo').textContent='str. '+PV_PAGE+' / '+PDFDOC.numPages;
   if(ACTIVE_FIELD) highlightField(ACTIVE_FIELD);
+  drawAnchors();
+}
+const FIELD_LABELS={supName:'Název',supIco:'IČO',supDic:'DIČ',supStreet:'Ulice',supCity:'Město',supZip:'PSČ',
+  number:'Číslo dokladu',vs:'VS',vyst:'Vystavení',duzp:'DUZP',splat:'Splatnost',account:'Účet',
+  total:'Celkem',rounding:'Zaokrouhlení','__vat__':'Rekapitulace DPH'};
+let SHOW_ANCHORS=true;
+function drawAnchors(){
+  const ov=$('pdfOverlay'); if(!ov) return;
+  ov.querySelectorAll('.anchbox').forEach(e=>e.remove());
+  $('anchToggle').classList.toggle('on', SHOW_ANCHORS);
+  if(!SHOW_ANCHORS||!F||!PV_VP) return;
+  const saved=((loadTpls()[F.supIco]||{}).anchors)||{};
+  const all=Object.assign({}, saved, F._anchors||{});
+  const pg=PAGES_NORM[PV_PAGE-1]; if(!pg) return;
+  for(const field in all){
+    const a=all[field]; if((a.page||1)!==PV_PAGE) continue;
+    const p=PV_VP.convertToViewportPoint(a.box[0]*pg.w, a.box[1]*pg.h);
+    const q=PV_VP.convertToViewportPoint(a.box[2]*pg.w, a.box[3]*pg.h);
+    const x1=Math.min(p[0],q[0]), x2=Math.max(p[0],q[0]), y1=Math.min(p[1],q[1]), y2=Math.max(p[1],q[1]);
+    const d=document.createElement('div'); d.className='anchbox';
+    d.style.left=x1+'px'; d.style.top=y1+'px'; d.style.width=(x2-x1)+'px'; d.style.height=(y2-y1)+'px';
+    const lb=document.createElement('span'); lb.textContent=FIELD_LABELS[field]||field; d.appendChild(lb);
+    ov.appendChild(d);
+  }
 }
 function setActive(key){
   ACTIVE_FIELD=key;
@@ -562,7 +619,7 @@ function highlightField(key){
 }
 function setFieldValue(key, text){
   if(key==='__vat__'){ const rows=extractVatFromText(text); if(rows.length) F.vat=rows; else alert('Z výřezu se nepodařilo přečíst DPH (potřebuju základ, sazbu a DPH). Zkus širší rámeček přes rekapitulaci, nebo doplň ručně.'); }
-  else if(key==='total'){ F.total=parseCzNum(text); }
+  else if(key==='total'||key==='rounding'){ F[key]=parseCzNum(text); }
   else { F[key]=text.trim(); if(key==='supDic') F.foreign=!!(F.supDic&&!/^CZ/.test(F.supDic)); if(key==='supIco') F.supIco=(F.supIco||'').replace(/\s/g,''); }
   clearActive(); render();
 }
@@ -588,6 +645,7 @@ function initPreviewUI(){
         const W=PAGES_NORM[PV_PAGE-1].w, H=PAGES_NORM[PV_PAGE-1].h;
         F._anchors=F._anchors||{};
         F._anchors[fld]={page:PV_PAGE, box:[p1[0]/W,p1[1]/H,p2[0]/W,p2[1]/H]};
+        drawAnchors();
       }
       setFieldValue(fld, text);
     } else clearActive();
@@ -596,6 +654,7 @@ function initPreviewUI(){
   ov.addEventListener('touchstart',start,{passive:false}); ov.addEventListener('touchmove',move,{passive:false}); ov.addEventListener('touchend',end);
   $('pgPrev').onclick=()=>renderPreview(PV_PAGE-1);
   $('pgNext').onclick=()=>renderPreview(PV_PAGE+1);
+  $('anchToggle').onclick=()=>{ SHOW_ANCHORS=!SHOW_ANCHORS; drawAnchors(); };
 }
 
 /* ---------- vstup ---------- */
