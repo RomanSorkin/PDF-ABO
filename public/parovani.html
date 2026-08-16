@@ -196,7 +196,9 @@ function parseGpc(bytes){
   const text=new TextDecoder('windows-1250').decode(bytes);
   const lines=text.split(/\r\n|\r|\n/).filter(l=>l.length>=100);
   const h=lines.find(l=>l.slice(0,3)==='074');
-  GPC_HDR = h ? { account:stripLead(h.slice(3,19))||h.slice(3,19).trim(), name:h.slice(19,39).trim() } : {};
+  // otisk výpisu: celá věta 074 (účet, zůstatky, obraty, č. výpisu, datum) — liší se mezi měnami i měsíci
+  const fp=(s)=>{ let x=5381; for(let i=0;i<s.length;i++) x=((x*33)^s.charCodeAt(i))>>>0; return x.toString(36); };
+  GPC_HDR = h ? { account:stripLead(h.slice(3,19))||h.slice(3,19).trim(), name:h.slice(19,39).trim(), fp:fp(h) } : {fp:'x'};
   const mov=lines.filter(l=>l.slice(0,3)==='075').map((r,i)=>({
     i, amount:(parseInt(r.slice(48,60),10)||0)/100*(r[60]==='2'?1:-1),
     vs:stripLead(r.slice(61,71)), ks:stripLead(r.slice(71,81)), ss:stripLead(r.slice(81,91)),
@@ -393,7 +395,8 @@ function excelBlob(){
    Ukládá: vysvětlivky, vydané doklady (INV), spárované Zásilkovny (m.zas) a GoPay,
    takže po novém nahrání téhož GPC se vše obnoví bez XML a bez volání API. */
 const movSig=m=>[m.book,m.vs,Math.round(m.amount*100),m.i].join('|');
-const stateKey=()=>'par_state:'+(GPC_HDR.account||'x');
+const stateKey=()=>'par_state:'+(GPC_HDR.account||'x')+':'+(GPC_HDR.fp||'x');   // per konkrétní výpis (měna/měsíc)
+const stateKeyLegacy=()=>'par_state:'+(GPC_HDR.account||'x');                    // starší uložení (jen účet)
 function saveState(){
   if(!MOV){ alert('Nejdřív nahraj GPC výpis.'); return; }
   const expl={}, zas={};
@@ -403,13 +406,18 @@ function saveState(){
   const st={savedAt:new Date().toISOString(), expl, zas, inv:INV||null, gopay:GOPAY||null};
   try{ localStorage.setItem(stateKey(), JSON.stringify(st)); }
   catch(e){ alert('Uložení selhalo (možná příliš velká data): '+e.message); return; }
-  $('podkladyProg').textContent='Stav uložen: '+Object.keys(expl).length+' vysvětlivek, '
+  $('podkladyProg').textContent='Stav uložen pro výpis '+(GPC_HDR.account||'')+(GPC_HDR.cur?' '+GPC_HDR.cur:'')+': '
+    +Object.keys(expl).length+' vysvětlivek, '
     +Object.keys(zas).length+'× Zásilkovna'+(INV?', '+INV.list.length+' dokladů':'')
     +(GOPAY&&Object.keys(GOPAY).length?', '+Object.keys(GOPAY).length+'× GoPay':'')+'.';
 }
 function restoreState(){
   let st=null;
   try{ st=JSON.parse(localStorage.getItem(stateKey())||'null'); }catch(e){}
+  if(!st){ // migrace ze staršího klíče (jen účet): vysvětlivky se párují přes podpis pohybu, takže cizí měna/měsíc nic nepřepíše
+    try{ st=JSON.parse(localStorage.getItem(stateKeyLegacy())||'null'); }catch(e){}
+    if(st){ try{ localStorage.setItem(stateKey(), JSON.stringify(st)); }catch(e){} }
+  }
   if(!st) return '';
   let nE=0,nZ=0;
   MOV.forEach(m=>{ const s=movSig(m);
@@ -548,6 +556,7 @@ function fail(msg){ const e=$('errbox'); e.textContent='Chyba: '+msg; show(e,tru
 function readGpc(file){
   const rd=new FileReader();
   rd.onload=e=>{ try{ MOV=parseGpc(new Uint8Array(e.target.result)); show($('errbox'),false);
+      GPC_HDR.cur=(file.name.match(/-([A-Z]{3})\.gpc$/i)||[])[1]||'';
       const msg=restoreState();
       $('slotGpc').classList.add('done'); $('gpcFn').textContent=file.name;
       $('gpcNum').textContent=MOV.length+' pohybů'; render();
