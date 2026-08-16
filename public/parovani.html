@@ -467,7 +467,7 @@ async function podklady(){
     for(const m of zs){
       done++; prog.textContent='Zásilkovna '+done+'/'+zs.length+' (VS '+m.vs+')…';
       const acc=(m.zas&&m.zas.account)||'';
-      const dir=zip.folder('zasilkovna_'+m.vs);
+      const dir=zip.folder('Zasilkovna');
       const grab=async(path,params,fname)=>{
         try{ const r=await zasApi(path, acc?Object.assign({account:acc},params):params);
           if(!r.ok) throw 0; dir.file(fname, await r.arrayBuffer()); return true;
@@ -498,7 +498,7 @@ async function podklady(){
     let gDone=0; const gErrs=[];
     for(const m of gp){
       gDone++; prog.textContent='GoPay '+gDone+'/'+gp.length+' (VS '+m.vs+')…';
-      const g=m.gopay, dir=zip.folder('gopay_'+m.vs);
+      const g=m.gopay, dir=zip.folder('GoPay');
       if(g.rawXml) dir.file('clearing_'+m.vs+'.xml', g.rawXml); else gErrs.push(m.vs);
       const esc=s=>'"'+String(s==null?'':s).replace(/"/g,'""')+'"';
       const head='Datum;Objednávka;Protistrana;Částka\n';
