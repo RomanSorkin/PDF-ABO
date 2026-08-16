@@ -480,11 +480,26 @@ async function podklady(){
     }
     // 3) spárovaná GoPay vyúčtování (clearing XML + CSV rozpis plateb)
     const gp=MOV.filter(m=>m.state==='g'&&m.gopay);
-    let gDone=0;
+    // chybí-li některým originální XML (starší uložený stav), zkus je jednorázově dotáhnout z e-mailu
+    if(gp.some(m=>!m.gopay.rawXml) && GOPAY_OK){
+      prog.textContent='doplňuji GoPay XML z e-mailu…';
+      try{
+        const headers={}; if(ZAS_TOKEN) headers['x-app-token']=ZAS_TOKEN;
+        const r=await fetch('/api/gopay/clearings',{headers});
+        const data=await r.json();
+        if(r.ok) for(const c of (data.clearings||[])){
+          try{ const cl=parseGoPayClearing(c.xml);
+            if(cl.sym){ GOPAY=GOPAY||{}; GOPAY[cl.sym]=cl;
+              const mm=gp.find(m=>m.vs===cl.sym); if(mm) mm.gopay=cl; }
+          }catch{}
+        }
+      }catch(e){}
+    }
+    let gDone=0; const gErrs=[];
     for(const m of gp){
       gDone++; prog.textContent='GoPay '+gDone+'/'+gp.length+' (VS '+m.vs+')…';
       const g=m.gopay, dir=zip.folder('gopay_'+m.vs);
-      if(g.rawXml) dir.file('clearing_'+m.vs+'.xml', g.rawXml);
+      if(g.rawXml) dir.file('clearing_'+m.vs+'.xml', g.rawXml); else gErrs.push(m.vs);
       const esc=s=>'"'+String(s==null?'':s).replace(/"/g,'""')+'"';
       const head='Datum;Objednávka;Protistrana;Částka\n';
       const rows=(g.movements||[]).map(x=>[x.date,x.orderId,x.counterparty,String(x.amount).replace('.',',')].map(esc).join(';')).join('\n');
@@ -498,7 +513,9 @@ async function podklady(){
     const blob=await zip.generateAsync({type:'blob'});
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='podklady-'+tag+'.zip'; a.click();
     setTimeout(()=>URL.revokeObjectURL(a.href),4000);
-    prog.textContent='Podklady staženy: Excel + '+zs.length+'× Zásilkovna + '+gp.length+'× GoPay'+(errs.length?' · nepovedlo se: VS '+errs.join(', '):'');
+    prog.textContent='Podklady staženy: Excel + '+zs.length+'× Zásilkovna + '+gp.length+'× GoPay'
+      +(errs.length?' · Zásilkovna nepovedla se: VS '+errs.join(', '):'')
+      +(gErrs.length?' · GoPay bez XML (načti znovu „GoPay z e-mailu" nebo nahraj clearing soubory): VS '+gErrs.join(', '):'');
   }catch(e){ alert('Podklady se nepodařilo připravit: '+e.message); prog.textContent=''; }
   finally{ btn.disabled=false; }
 }
