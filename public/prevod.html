@@ -390,21 +390,23 @@ function parseAirbank(lines, joined){
   const raw=lines.map(l=>l.text);
   const owner=(raw[0]||'').trim();
   const rows=raw.filter(l=>l && !NOISE.test(l));
-  const TYP=/(Platba kartou|Příchozí úhrada|Odchozí úhrada|Jednorázová úhrada|Trvalý příkaz|Poplatek|Úrok)/;
-  const reA=/^(\d{1,2}\.\d{1,2}\.\d{4})\s+(.+?)\s+(-?\d[\d\s]*[.,]\d{2})\s+\d[\d\s]*[.,]\d{2}\s*$/;
+  const TYP=/(Platba kartou|Příchozí úhrada|Odchozí úhrada|Zahraniční odchozí(?:\s+úhrada)?|Zahraniční příchozí(?:\s+úhrada)?|Jednorázová úhrada|Trvalý příkaz|Poplatek|Úrok)/;
+  const reA=/^(\d{1,2}\.\d{1,2}\.\d{4})\s+(.+?)\s+(-?\d[\d\s]*[.,]\d{2})\s+(-?\d[\d\s]*[.,]\d{2})\s*$/;
   const reB=/^(\d{1,2}\.\d{1,2}\.\d{4})\s+(\d{10,13})\b\s*(.*)$/;
 
   const blocks=[]; let cur=null;
   for(const ln of rows){
     const mA=ln.match(reA);
-    if(mA){ if(cur)blocks.push(cur); cur={aDate:mA[1], mid:mA[2], amount:parseCzNum(mA[3]), rest:[]}; continue; }
+    if(mA){ if(cur)blocks.push(cur); cur={aDate:mA[1], mid:mA[2], amount:parseCzNum(mA[3]), fee:parseCzNum(mA[4])||0, rest:[]}; continue; }
     if(cur) cur.rest.push(ln);
   }
   if(cur)blocks.push(cur);
 
   const items=blocks.map(b=>{
     const bLine=b.rest.find(l=>reB.test(l)); const mB=bLine?bLine.match(reB):null;
-    const kod=mB?mB[2]:''; const bRest=mB?mB[3]:'';
+    const kod=(mB?mB[2]:'')||(b.rest.map(l=>(l.match(/^(\d{10,13})\b/)||[])[1]).find(Boolean))||'';
+    const bRest=mB?mB[3]:'';
+    const valutaStr=(mB?mB[1]:'')||((b.rest.map(l=>(l.match(/^(\d{1,2}\.\d{1,2}\.\d{4})\b/)||[])[1]).find(Boolean))||'');
     const full=[b.mid,...b.rest].join(' ');
     const typ=(b.mid.match(TYP)||[])[0]||'';
     const card=/kartou/i.test(b.mid)||/\*{2,}/.test(bRest);
@@ -416,14 +418,23 @@ function parseAirbank(lines, joined){
       midRest=midRest.replace(owner,'').trim();
       party=midRest.split(/,| UL\.| Via | Na Porici/)[0].replace(/\s+/g,' ').trim();
     } else {
-      party=midRest.split(/\s+VS\d|\s+VS\s/)[0].replace(/\s+/g,' ').trim();
+      party=midRest.split(/\s+VS\d|\s+VS\s/)[0]
+        .replace(/\s+\S*\s*BANK\b.*$/i,'')   // odřízni banku příjemce (ING BANK SLASKI SA / POL)
+        .replace(/\s+/g,' ').trim();
       if(!party){ const msg=(b.rest.find(l=>!reB.test(l)&&!/kurz/.test(l))||'').trim(); party=msg||typ; }
     }
     if(party.length>40) party=typ||party.slice(0,40);
-    return {book:parseDate(b.aDate), valuta:(mB?parseDate(mB[1]):null)||parseDate(b.aDate),
-            kod, proti, party:deacc(party), vs, ks:'', ss, amount:b.amount};
+    return {book:parseDate(b.aDate), valuta:(valutaStr?parseDate(valutaStr):null)||parseDate(b.aDate),
+            kod, proti, party:deacc(party), vs, ks:'', ss, amount:b.amount, fee:b.fee||0};
   }).filter(t=>t.kod && !isNaN(t.amount));
-  return {H, items};
+  // poplatek banky = samostatný pohyb (Air Bank ho počítá do "Odepsáno z účtu" zvlášť)
+  const out=[];
+  for(const t of items){
+    out.push(t);
+    if(t.fee && Math.abs(t.fee)>0.005)
+      out.push({book:t.book, valuta:t.valuta, kod:'', proti:'', party:'AB poplatek', vs:'', ks:'', ss:'', amount:-Math.abs(t.fee), fee:0});
+  }
+  return {H, items:out};
 }
 
 /* ========== ČESKÁ SPOŘITELNA ========== */
