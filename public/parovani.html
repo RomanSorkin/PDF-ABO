@@ -602,6 +602,7 @@ async function podklady(){
     // 2) spárované Zásilkovny ve všech formátech (rozpis CSV, Pohoda CSV, PDF faktury)
     const zs=MOV.filter(m=>m.state==='z');
     const errs=[]; let done=0;
+    const zasBatch=[]; let zasBatchIco='';
     for(const m of zs){
       done++; prog.textContent='Zásilkovna '+done+'/'+zs.length+' (VS '+m.vs+')…';
       const acc=(m.zas&&m.zas.account)||'';
@@ -619,11 +620,18 @@ async function podklady(){
         try{
           await loadPdfJs();
           const inv=parseZasInvoice(await extractRows(pdfBuf.slice(0)), m.vs);
-          if(inv.items.length) dir.file('pohoda-import-'+m.vs+'.xml', toCp1250Bytes(buildPohodaXml(inv)));
-          else errs.push(m.vs+' (XML)');
+          if(inv.items.length){
+            dir.file('pohoda-import-'+m.vs+'.xml', toCp1250Bytes(buildPohodaXml(inv)));
+            zasBatch.push(pohodaInvoiceItem(inv)); if(!zasBatchIco) zasBatchIco=inv.custIco;
+          } else errs.push(m.vs+' (XML)');
         }catch(e){ errs.push(m.vs+' (XML)'); }
       }
       if(!ok1&&!ok2&&!pdfBuf) errs.push(m.vs);
+    }
+    // společný Pohoda XML: všechny faktury Zásilkovny v jednom dataPacku (hromadný import)
+    if(zasBatch.length){
+      const batchXml=pohodaDataPack(zasBatchIco, zasBatch.join('\n'), 'ZAS-BATCH-'+tag);
+      zip.folder('Zasilkovna').file('pohoda-import-vse.xml', toCp1250Bytes(batchXml));
     }
     // 3) spárovaná GoPay vyúčtování (clearing XML + CSV rozpis plateb)
     const gp=MOV.filter(m=>m.state==='g'&&m.gopay);
