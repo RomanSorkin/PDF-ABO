@@ -441,6 +441,144 @@ function restoreState(){
   return 'Obnoveno z uloženého stavu: '+nE+' vysvětlivek, '+nZ+'× Zásilkovna'+extra+'.';
 }
 
+
+/* ---------- Zásilkovna → Pohoda XML (převzato ze stránky Faktury) ---------- */
+function loadPdfJs(){
+  return new Promise((res,rej)=>{
+    if(window.pdfjsLib) return res();
+    const s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.onload=()=>{ pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; res(); };
+    s.onerror=()=>rej(new Error('pdf.js se nenačetl'));
+    document.head.appendChild(s);
+  });
+}
+const znum=(s)=>parseFloat(String(s).replace(/\u00a0/g,'').replace(/\s/g,'').replace(',','.'))||0;
+const r2=(x)=>Math.round(x*100)/100;
+const two=(x)=>x.toFixed(2);
+const xmlesc=(s)=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// pdf.js: rekonstrukce vizuálních řádků z pozic (stejně jako v převodníku)
+async function extractRows(buf){
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const out=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const items=(await page.getTextContent()).items.filter(it=>it.str&&it.str.trim().length)
+      .map(it=>({x:it.transform[4],y:it.transform[5],s:it.str}));
+    items.sort((a,b)=>b.y-a.y||a.x-b.x);
+    const rows=[]; let cur=null;
+    for(const it of items){ if(!cur||Math.abs(cur.y-it.y)>3){cur={y:it.y,toks:[]};rows.push(cur);} cur.toks.push(it); }
+    rows.forEach(r=>r.toks.sort((a,b)=>a.x-b.x));
+    rows.forEach(r=>out.push(r.toks.map(t=>t.s).join(' ').replace(/\s+/g,' ').trim()));
+  }
+  return out;
+}
+
+function parseZasInvoice(lines, number){
+  const all=lines.join('\n');
+  const find=(re,d='')=>{ const m=all.match(re); return m?m[1].trim():d; };
+  const toISO=(s)=>{ const p=(String(s).match(/\d+/g)||[]); if(p.length<3) return ''; let[d,mo,y]=p; y=+y; if(y<100)y+=2000; return y+'-'+String(+mo).padStart(2,'0')+'-'+String(+d).padStart(2,'0'); };
+  const vs=find(/Variabiln[íi] symbol\s*:?\s*(\d+)/i, number);
+  const ks=find(/Konstat?n[íi] symbol\s*:?\s*(\d+)/i,'0308');
+  const vyst=toISO(find(/Datum vystaven[íi]\s*:?\s*([\d.\s]+)/i));
+  const splat=toISO(find(/Datum splatnosti\s*:?\s*([\d.\s]+)/i));
+  const duzp=toISO(find(/Datum uskute[čc]n[ěe]n[íi][^:]*:\s*([\d.\s]+)/i))||vyst;
+  const SRE=/^(.+?)\s+([\d.,]+)(?:\s*ks)?\s+([\d\s.,]+?)\s+(\d+[.,]?\d*)\s*%\s+([\d\s.,]+?)\s*CZK\s*$/;
+  const isSvc=(t)=>{ const mm=t.match(SRE); return !!mm && !/Celkem|DPH|Fakturovan|Množstv|Základ/i.test(mm[1]); };
+  const items=[];
+  for(let idx=0; idx<lines.length; idx++){
+    const m=lines[idx].match(SRE);
+    if(!m) continue;
+    let name=m[1].trim();
+    if(/Celkem|DPH|Fakturovan|Množstv|Základ/i.test(name)) continue;
+    // slouč zalomený název (pokračovací řádek hned pod ním)
+    for(let j=idx+1; j<lines.length; j++){
+      const nx=lines[j];
+      if(isSvc(nx)) break;
+      if(/CZK|Celkem|Součet|Souhrn|DPH|Fakturovan|Základ|Rekapitulace|Přehled|Vybran|Bude|Daňový|Powered|Zapsáno|IBAN|Účet|symbol/i.test(nx)) break;
+      if(!/[A-Za-zÁ-ž]/.test(nx) || nx.length>40) break;
+      name+=' '+nx.trim();
+    }
+    items.push({name, qty:znum(m[2]), unit:znum(m[3]), rate:znum(m[4]), total:znum(m[5])});
+  }
+  const incl=znum(find(/Fakturovan[áa] [čc][áa]stka v[čc]etn[ěe] DPH\s+([\d\s.,]+)\s*CZK/i));
+  // IČ/DIČ odběratele = ta hodnota, která NENÍ Zásilkovny (28408306) — kvůli více účtům/firmám
+  const icos=[...all.matchAll(/I[ČC]\s*:?\s*(\d{6,9})/gi)].map(x=>x[1]);
+  const custIco=icos.find(i=>i.replace(/^0+/,'')!=='28408306')||'';
+  const dics=[...all.matchAll(/DI[ČC]\s*:?\s*(CZ\d+)/gi)].map(x=>x[1]);
+  const custDic=dics.find(d=>d!=='CZ28408306')||'';
+  return {number, vs, ks, vyst, splat, duzp, items, incl, custIco, custDic};
+}
+const POH_PREDKONTACE='518služby', POH_CLENENI='PD';
+const gnum=(x)=>(+(Math.round(x*100)/100)).toString();   // 684 / 872.3 / 143.64 (bez koncových nul)
+// Pohoda XML NEpodporuje UTF-8 → soubor musí být ve Windows-1250 (dle XSD a dokumentace Stormware).
+const CP1250=(()=>{ const d=new TextDecoder('windows-1250'),m={}; for(let b=0;b<256;b++) m[d.decode(new Uint8Array([b]))]=b; return m; })();
+function toCp1250Bytes(str){ const out=new Uint8Array(str.length); for(let i=0;i<str.length;i++) out[i]=CP1250[str[i]] ?? 0x3F; return out; }
+const pohodaBlob=(xml)=>new Blob([toCp1250Bytes(xml)],{type:'application/xml'});
+
+function pohodaInvoiceItem(inv){
+  const items=inv.items.map(it=>{
+    const vat=r2(it.total*it.rate/100);
+    return `        <inv:invoiceItem>
+          <inv:text>${xmlesc(it.name)}</inv:text>
+          <inv:quantity>1</inv:quantity>
+          <inv:unit>ks</inv:unit>
+          <inv:payVAT>false</inv:payVAT>
+          <inv:rateVAT>high</inv:rateVAT>
+          <inv:homeCurrency>
+            <typ:unitPrice>${gnum(it.total)}</typ:unitPrice>
+            <typ:price>${gnum(it.total)}</typ:price>
+            <typ:priceVAT>${gnum(vat)}</typ:priceVAT>
+          </inv:homeCurrency>
+          <inv:accounting><typ:ids>${POH_PREDKONTACE}</typ:ids></inv:accounting>
+          <inv:classificationVAT><typ:ids>${POH_CLENENI}</typ:ids></inv:classificationVAT>
+        </inv:invoiceItem>`;
+  }).join('\n');
+  return `  <dat:dataPackItem id="ZAS-${xmlesc(inv.number)}" version="2.0">
+    <inv:invoice version="2.0">
+      <inv:invoiceHeader>
+        <inv:invoiceType>receivedInvoice</inv:invoiceType>
+        <inv:symVar>${xmlesc(inv.vs)}</inv:symVar>
+        <inv:originalDocument>${xmlesc(inv.number)}</inv:originalDocument>
+        <inv:date>${inv.vyst}</inv:date>
+        <inv:dateTax>${inv.duzp}</inv:dateTax>
+        <inv:dateAccounting>${inv.vyst}</inv:dateAccounting>
+        <inv:dateKHDPH>${inv.duzp}</inv:dateKHDPH>
+        <inv:dateDue>${inv.splat}</inv:dateDue>
+        <inv:accounting><typ:ids>${POH_PREDKONTACE}</typ:ids></inv:accounting>
+        <inv:classificationVAT><typ:ids>${POH_CLENENI}</typ:ids></inv:classificationVAT>
+        <inv:text>Zásilkovna s.r.o.</inv:text>
+        <inv:partnerIdentity>
+          <typ:address>
+            <typ:company>Zásilkovna s.r.o.</typ:company>
+            <typ:ico>28408306</typ:ico>
+            <typ:dic>CZ28408306</typ:dic>
+            <typ:street>Českomoravská 2408/1a</typ:street>
+            <typ:city>Praha</typ:city>
+            <typ:zip>19000</typ:zip>
+            <typ:country><typ:ids>CZ</typ:ids></typ:country>
+          </typ:address>
+        </inv:partnerIdentity>
+        <inv:paymentType><typ:ids>Příkazem</typ:ids></inv:paymentType>
+        <inv:note>Faktura za služby Zásilkovny – uhrazeno zápočtem</inv:note>
+      </inv:invoiceHeader>
+      <inv:invoiceDetail>
+${items}
+      </inv:invoiceDetail>
+    </inv:invoice>
+  </dat:dataPackItem>`;
+}
+function pohodaDataPack(ico, itemsXml, id){
+  return `<?xml version="1.0" encoding="Windows-1250"?>
+<dat:dataPack xmlns:dat="http://www.stormware.cz/schema/version_2/data.xsd" xmlns:inv="http://www.stormware.cz/schema/version_2/invoice.xsd" xmlns:typ="http://www.stormware.cz/schema/version_2/type.xsd" id="${xmlesc(id)}" ico="${xmlesc(ico||'')}" application="abo-gpc-viewer" version="2.0" note="Faktury Zásilkovny -> Pohoda">
+${itemsXml}
+</dat:dataPack>
+`;
+}
+function buildPohodaXml(inv){ return pohodaDataPack(inv.custIco, pohodaInvoiceItem(inv), 'ZAS-'+inv.number); }
+
+
 /* ---------- Stáhnout podklady: Excel + rozpisy Zásilkovny ve všech formátech ---------- */
 function loadJSZip(){
   return new Promise((res,rej)=>{
@@ -470,13 +608,22 @@ async function podklady(){
       const dir=zip.folder('Zasilkovna');
       const grab=async(path,params,fname)=>{
         try{ const r=await zasApi(path, acc?Object.assign({account:acc},params):params);
-          if(!r.ok) throw 0; dir.file(fname, await r.arrayBuffer()); return true;
-        }catch(e){ return false; }
+          if(!r.ok) throw 0; const buf=await r.arrayBuffer(); dir.file(fname, buf); return buf;
+        }catch(e){ return null; }
       };
       const ok1=await grab('/api/zasilkovna/packet',{number:m.vs,version:5,lang:'cs'},'rozpis_'+m.vs+'.csv');
       const ok2=await grab('/api/zasilkovna/packet-pohoda',{var_symbol:m.vs,lang:'cs'},'pohoda_'+m.vs+'.csv');
-      const ok3=await grab('/api/zasilkovna/pdf',{number:m.vs},'Faktura_'+m.vs+'.pdf');
-      if(!ok1&&!ok2&&!ok3) errs.push(m.vs);
+      const pdfBuf=await grab('/api/zasilkovna/pdf',{number:m.vs},'Faktura_'+m.vs+'.pdf');
+      // Pohoda XML (nativní doklad) z PDF faktury — stejný generátor jako na stránce Faktury
+      if(pdfBuf){
+        try{
+          await loadPdfJs();
+          const inv=parseZasInvoice(await extractRows(pdfBuf.slice(0)), m.vs);
+          if(inv.items.length) dir.file('pohoda-import-'+m.vs+'.xml', toCp1250Bytes(buildPohodaXml(inv)));
+          else errs.push(m.vs+' (XML)');
+        }catch(e){ errs.push(m.vs+' (XML)'); }
+      }
+      if(!ok1&&!ok2&&!pdfBuf) errs.push(m.vs);
     }
     // 3) spárovaná GoPay vyúčtování (clearing XML + CSV rozpis plateb)
     const gp=MOV.filter(m=>m.state==='g'&&m.gopay);
