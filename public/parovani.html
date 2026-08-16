@@ -252,7 +252,8 @@ function parseGoPayClearing(text){
     amountGross:parseFloat(a('amount'))||0,
     amountFee:(parseFloat(a('amountFee'))||0)+(parseFloat(a('amountFeeExternal'))||0),
     from:a('dateClearedFrom'), to:a('dateClearedTo'),
-    movements
+    movements,
+    rawXml:text   // originál pro podklady (import do účetnictví)
   };
 }
 
@@ -477,11 +478,27 @@ async function podklady(){
       const ok3=await grab('/api/zasilkovna/pdf',{number:m.vs},'Faktura_'+m.vs+'.pdf');
       if(!ok1&&!ok2&&!ok3) errs.push(m.vs);
     }
+    // 3) spárovaná GoPay vyúčtování (clearing XML + CSV rozpis plateb)
+    const gp=MOV.filter(m=>m.state==='g'&&m.gopay);
+    let gDone=0;
+    for(const m of gp){
+      gDone++; prog.textContent='GoPay '+gDone+'/'+gp.length+' (VS '+m.vs+')…';
+      const g=m.gopay, dir=zip.folder('gopay_'+m.vs);
+      if(g.rawXml) dir.file('clearing_'+m.vs+'.xml', g.rawXml);
+      const esc=s=>'"'+String(s==null?'':s).replace(/"/g,'""')+'"';
+      const head='Datum;Objednávka;Protistrana;Částka\n';
+      const rows=(g.movements||[]).map(x=>[x.date,x.orderId,x.counterparty,String(x.amount).replace('.',',')].map(esc).join(';')).join('\n');
+      const sum='\n'+['Období',g.from+' - '+g.to,'',''].map(esc).join(';')
+        +'\n'+['Hrubá částka','', '', String(g.amountGross).replace('.',',')].map(esc).join(';')
+        +'\n'+['Poplatek GoPay','', '', String(-Math.abs(g.amountFee)).replace('.',',')].map(esc).join(';')
+        +'\n'+['Převedeno na účet','', '', String(g.amountTransfer).replace('.',',')].map(esc).join(';');
+      dir.file('rozpis_'+m.vs+'.csv', '\ufeff'+head+rows+sum);
+    }
     prog.textContent='balím zip…';
     const blob=await zip.generateAsync({type:'blob'});
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='podklady-'+tag+'.zip'; a.click();
     setTimeout(()=>URL.revokeObjectURL(a.href),4000);
-    prog.textContent='Podklady staženy: Excel + '+zs.length+'× Zásilkovna'+(errs.length?' · nepovedlo se: VS '+errs.join(', '):'');
+    prog.textContent='Podklady staženy: Excel + '+zs.length+'× Zásilkovna + '+gp.length+'× GoPay'+(errs.length?' · nepovedlo se: VS '+errs.join(', '):'');
   }catch(e){ alert('Podklady se nepodařilo připravit: '+e.message); prog.textContent=''; }
   finally{ btn.disabled=false; }
 }
