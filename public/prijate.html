@@ -47,6 +47,9 @@ table.vat input:focus{outline:1px solid var(--acc)}
 label .pick{display:inline-block;margin-left:5px;border:1px solid var(--line);background:#0e1016;color:var(--mut);border-radius:4px;cursor:pointer;font-size:11px;padding:0 5px;line-height:15px;vertical-align:middle}
 label .pick:hover,label .pick.on{border-color:var(--acc);color:var(--acc)}
 label .pick.has-anchor{border-color:var(--ok);color:var(--ok)}
+table.vat td{white-space:nowrap}
+table.vat .cellpick{border:1px solid var(--line);background:#0e1016;color:var(--mut);border-radius:4px;cursor:pointer;font-size:10px;padding:0 4px;line-height:14px;margin-left:3px;vertical-align:middle}
+table.vat .cellpick:hover,table.vat .cellpick.on{border-color:var(--acc);color:var(--acc)}
 #pdfOverlay{cursor:crosshair}
 #selRect{position:absolute;border:1.5px solid var(--acc);background:rgba(91,140,255,.18);pointer-events:none;z-index:5}
 .tokglow{position:absolute;background:rgba(47,191,113,.16);outline:1px solid rgba(47,191,113,.55);pointer-events:none;z-index:4}
@@ -157,6 +160,12 @@ function applyAnchors(f){
   for(const field in t.anchors){
     const text=tokensInNormBox(t.anchors[field].page, t.anchors[field].box); if(!text) continue;
     if(field==='__vat__'){ const rows=extractVatFromText(text); if(rows.length){f.vat=rows;f._anchored[field]=true;n++;} }
+    else if(field.startsWith('vat:')){
+      const [,iS,k]=field.split(':'); const i=+iS;
+      while(f.vat.length<=i) f.vat.push({base:0,rate:21,dph:0});
+      f.vat[i][k]= k==='rate' ? (+((text.match(/\d{1,2}/)||[])[0])||21) : parseCzNum(text);
+      f._anchored[field]=true; n++;
+    }
     else if(field==='total'||field==='rounding'){ f[field]=parseCzNum(text); f._anchored[field]=true; n++; }
     else { f[field]=text; if(field==='supDic')f.foreign=!!(f.supDic&&!/^CZ/.test(f.supDic)); if(field==='supIco')f.supIco=text.replace(/\s/g,''); f._anchored[field]=true; n++; }
   }
@@ -179,7 +188,7 @@ function extractInvoice(lines){
   f.foreign=!!(f.supDic && !/^CZ/.test(f.supDic));
 
   // --- název dodavatele: firma s právní formou v bloku "Dodavatel", různá od odběratele a od bank ---
-  const NAMERE=/([A-ZÁ-Ž][A-Za-zÁ-ž0-9.&\- ]{1,40}?(?:s\.\s?r\.\s?o\.?|a\.\s?s\.?(?=\s|,|$)|spol\.\s*s\s*r\.?\s*o\.?|s\.p\.|v\.o\.s\.))/g;
+  const NAMERE=/([A-ZÁ-Ž][A-Za-zÁ-ž0-9.,&\- ]{1,40}?(?:s\.\s?r\.\s?o\.?|a\.\s?s\.?(?=\s|,|$)|spol\.\s*s\s*r\.?\s*o\.?|s\.p\.|v\.o\.s\.))/g;
   const pickName=txt=>([...txt.matchAll(NAMERE)].map(m=>m[1].replace(/\s+/g,' ').trim())
     .filter(t=>!/Roman|Sorkin/i.test(t) && t.length>4 && !/Raiffeisen|spo[řr]iteln|Komer[čc]n[íi] banka|[ČC]SOB|Fio|Air Bank|MONETA|UniCredit|\bbanka\b/i.test(t))[0]||'');
   const di=joined.search(/Dodavatel|Prod[áa]vaj[íi]c[íi]/i);
@@ -221,18 +230,23 @@ function extractInvoice(lines){
 
   // --- rekapitulace DPH ---
   f.vat=[]; f.total=NaN;
-  const iRec=joined.search(/Rekapitulace DPH|Vy[čc][íi]slen[íi] DPH/i);
+  let iRec=joined.search(/Rekapitulace DPH|Vy[čc][íi]slen[íi] DPH/i);
+  if(iRec<0) iRec=joined.search(/Z[áa]klad\s+DPH|Sazba\s+DPH/i);   // fallback (Seznam) — může zahrnout i řádky položek, odfiltruje je aritmetika
   const recap = iRec>=0 ? joined.slice(iRec) : '';
-  const AMT='(-?\\d[\\d \\u00a0]*[.,]\\d{2})';
+  const AMT='(-?\\d[\\d \\u00a0]*[.,]\\d{2})'; const SEP='[ \\u00a0]*(?:K[čc]|CZK)?[ \\u00a0]*';
+  const vatOk=v=> v.rate===0 ? Math.abs(v.dph)<0.005 : Math.abs(v.base*v.rate/100-v.dph)<=Math.max(0.5,Math.abs(v.base)*0.02);
   if(recap){
-    // řádky "<základ> <sazba> <DPH>" i "<sazba> % <základ> <DPH>" (Alza)
-    let m;
-    const re1=new RegExp(AMT+'\\s+(0|10|12|15|21)\\s*%?\\s+'+AMT,'g');
-    while((m=re1.exec(recap))){ const base=parseCzNum(m[1]),rate=+m[2],dph=parseCzNum(m[3]); if((base||dph)) f.vat.push({base:r2(base),rate,dph:r2(dph)}); }
-    if(!f.vat.length){
-      const re1b=new RegExp('(0|10|12|15|21)\\s*%\\s+'+AMT+'\\s+'+AMT,'g');
-      while((m=re1b.exec(recap))){ const rate=+m[1],base=parseCzNum(m[2]),dph=parseCzNum(m[3]); if((base||dph)) f.vat.push({base:r2(base),rate,dph:r2(dph)}); }
+    // řádky "<základ> <sazba> <DPH>" i "<sazba> % <základ> <DPH>" (Alza, Seznam) — čísla může oddělovat "Kč"
+    let m; const found=[];
+    const re1=new RegExp(AMT+SEP+'(0|10|12|15|21)\\s*%?'+SEP+AMT,'g');
+    while((m=re1.exec(recap))){ const base=parseCzNum(m[1]),rate=+m[2],dph=parseCzNum(m[3]); if((base||dph)) found.push({base:r2(base),rate,dph:r2(dph)}); }
+    if(!found.length){
+      const re1b=new RegExp('(0|10|12|15|21)\\s*%'+SEP+AMT+SEP+AMT,'g');
+      while((m=re1b.exec(recap))){ const rate=+m[1],base=parseCzNum(m[2]),dph=parseCzNum(m[3]); if((base||dph)) found.push({base:r2(base),rate,dph:r2(dph)}); }
     }
+    // per-řádek: nech jen řádky, kde sedí aritmetika, a vyhoď duplicity
+    for(const v of found.filter(vatOk))
+      if(!f.vat.some(x=>x.rate===v.rate&&x.base===v.base&&x.dph===v.dph)) f.vat.push(v);
   }
   if(!f.vat.length){
     // fallback bez tabulky: "Celkem bez DPH", "DPH", sazba z "21 %"
@@ -303,12 +317,12 @@ function validate(f){
 
 /* ---------- Pohoda XML (přijatá faktura, syntetická položka na sazbu) ---------- */
 function extractVatFromText(txt){
-  const AMT='(-?\\d[\\d \\u00a0]*[.,]\\d{2})'; const rows=[];
+  const AMT='(-?\\d[\\d \\u00a0]*[.,]\\d{2})'; const SEP='[ \\u00a0]*(?:K[čc]|CZK)?[ \\u00a0]*'; const rows=[];
   const agg={}; const add=(base,rate,dph)=>{ if(base>0&&Math.abs(base*rate/100-dph)<Math.max(0.5,base*0.01)){ agg[rate]=agg[rate]||{base:0,dph:0}; agg[rate].base+=base; agg[rate].dph+=dph; } };
   let m;
-  const re1=new RegExp(AMT+'\\s+(0|10|12|15|21)\\s*%?\\s+'+AMT,'g');          // základ sazba DPH
+  const re1=new RegExp(AMT+SEP+'(0|10|12|15|21)\\s*%?'+SEP+AMT,'g');          // základ sazba DPH
   while((m=re1.exec(txt))) add(parseCzNum(m[1]),+m[2],parseCzNum(m[3]));
-  const re2=new RegExp('(0|10|12|15|21)\\s*%\\s+'+AMT+'\\s+'+AMT,'g');        // sazba % základ DPH (Alza)
+  const re2=new RegExp('(0|10|12|15|21)\\s*%'+SEP+AMT+SEP+AMT,'g');           // sazba % základ DPH (Alza, Seznam)
   while((m=re2.exec(txt))) add(parseCzNum(m[2]),+m[1],parseCzNum(m[3]));
   for(const r in agg) rows.push({base:r2(agg[r].base),rate:+r,dph:r2(agg[r].dph)});
   if(!rows.length){
@@ -410,9 +424,9 @@ function render(){
   const v=validate(F);
   if(!F.vat||!F.vat.length) F.vat=[{base:0,rate:21,dph:0}];
   const vatRows=F.vat.map((r,i)=>`<tr>
-    <td><input data-vat="${i}:base" value="${gnum(r.base)}"></td>
-    <td><input data-vat="${i}:rate" value="${r.rate}" style="width:48px"></td>
-    <td><input data-vat="${i}:dph" value="${gnum(r.dph)}"></td>
+    <td><input data-vat="${i}:base" value="${gnum(r.base)}"><button class="pick cellpick" data-pick="vat:${i}:base" title="Označit základ v PDF">◎</button></td>
+    <td><input data-vat="${i}:rate" value="${r.rate}" style="width:38px"><button class="pick cellpick" data-pick="vat:${i}:rate" title="Označit sazbu v PDF">◎</button></td>
+    <td><input data-vat="${i}:dph" value="${gnum(r.dph)}"><button class="pick cellpick" data-pick="vat:${i}:dph" title="Označit DPH v PDF">◎</button></td>
     <td class="muted">${gnum(r2(r.base+r.dph))}</td></tr>`).join('');
 
   $('review').innerHTML=`
@@ -599,7 +613,9 @@ function drawAnchors(){
     const x1=Math.min(p[0],q[0]), x2=Math.max(p[0],q[0]), y1=Math.min(p[1],q[1]), y2=Math.max(p[1],q[1]);
     const d=document.createElement('div'); d.className='anchbox';
     d.style.left=x1+'px'; d.style.top=y1+'px'; d.style.width=(x2-x1)+'px'; d.style.height=(y2-y1)+'px';
-    const lb=document.createElement('span'); lb.textContent=FIELD_LABELS[field]||field; d.appendChild(lb);
+    let lbl=FIELD_LABELS[field]||field;
+    if(field.startsWith('vat:')){ const [,i,k]=field.split(':'); lbl='DPH ř.'+(+i+1)+' '+({base:'základ',rate:'sazba',dph:'DPH'}[k]||k); }
+    const lb=document.createElement('span'); lb.textContent=lbl; d.appendChild(lb);
     ov.appendChild(d);
   }
 }
@@ -618,7 +634,12 @@ function highlightField(key){
   }});
 }
 function setFieldValue(key, text){
-  if(key==='__vat__'){ const rows=extractVatFromText(text); if(rows.length) F.vat=rows; else alert('Z výřezu se nepodařilo přečíst DPH (potřebuju základ, sazbu a DPH). Zkus širší rámeček přes rekapitulaci, nebo doplň ručně.'); }
+  if(key==='__vat__'){ const rows=extractVatFromText(text); if(rows.length) F.vat=rows; else alert('Z výřezu se nepodařilo přečíst DPH (potřebuju základ, sazbu a DPH). Zkus širší rámeček přes rekapitulaci, nebo označ jednotlivé buňky (◎ u základu/sazby/DPH), případně doplň ručně.'); }
+  else if(key.startsWith('vat:')){
+    const [,iS,k]=key.split(':'); const i=+iS;
+    while(F.vat.length<=i) F.vat.push({base:0,rate:21,dph:0});
+    F.vat[i][k]= k==='rate' ? (+((text.match(/\d{1,2}/)||[])[0])||21) : parseCzNum(text);
+  }
   else if(key==='total'||key==='rounding'){ F[key]=parseCzNum(text); }
   else { F[key]=text.trim(); if(key==='supDic') F.foreign=!!(F.supDic&&!/^CZ/.test(F.supDic)); if(key==='supIco') F.supIco=(F.supIco||'').replace(/\s/g,''); }
   clearActive(); render();
