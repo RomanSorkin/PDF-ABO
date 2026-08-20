@@ -266,12 +266,18 @@ function extractInvoice(lines){
   // zaokrouhlení (např. Alza: -0,31 Kč)
   f.rounding=parseCzNum((joined.match(new RegExp('Zaokrouhlen[íi]\\s*:?\\s*'+AMT,'i'))||[])[1]);
   if(isNaN(f.rounding)) f.rounding=0;
-  // celková částka k úhradě (přednost: K ÚHRADĚ; jinak poslední "Celkem: … Kč" — finální po zaokrouhlení)
+  // "Zaplaceno" a "(Částka) k úhradě" jako samostatná pole (Seznam aj.)
+  const paidM=parseCzNum((joined.match(new RegExp('(?:Zaplaceno|Uhrazeno)\\s*:?\\s*'+AMT,'i'))||[])[1]);
+  const dueM =parseCzNum((joined.match(new RegExp('(?:[ČC][áa]stka\\s+)?[Kk] [úu]hrad[ěe](?!\\s*celkem)\\s*:?\\s*'+AMT))||[])[1]);
+  f.paid=isNaN(paidM)?null:r2(paidM);
+  f.due =isNaN(dueM)?null:r2(dueM);
+  // celková částka dokladu (přednost: K ÚHRADĚ CELKEM; poslední "Celkem: … Kč"; nenulové "k úhradě"; součet DPH)
   f.total=parseCzNum((joined.match(new RegExp('(?:CELKEM K [ÚU]HRAD[ĚE]|K [úu]hrad[ěe] celkem[^\\d]*K[čc]?|Celkem s DPH|Celkem\\s*K[čc])\\s*:?\\s*'+AMT,'i'))||[])[1]);
   if(isNaN(f.total)){
     const alls=[...joined.matchAll(new RegExp('Celkem\\s*:?\\s*'+AMT+'\\s*K[čc]','gi'))];
     if(alls.length) f.total=parseCzNum(alls[alls.length-1][1]);
   }
+  if(isNaN(f.total)&&f.due!=null&&f.due>0.005) f.total=f.due;
   if(isNaN(f.total)&&f.vat.length) f.total=r2(f.vat.reduce((a,v)=>a+v.base+v.dph,0)+f.rounding);
 
   // splatnost může chybět (uhrazeno) → default DUZP/vystavení
@@ -280,6 +286,8 @@ function extractInvoice(lines){
   // --- záloha / vyúčtování (K úhradě 0) ---
   f.advance = /Zaplacen[áa] z[áa]loha|Odpo[čc]et DPH zaplacen|zálohov[ýé]ch faktur/i.test(joined)
             || (Math.abs(f.total)<0.005 && /z[áa]loh/i.test(joined));
+  // již uhrazená běžná faktura (Zaplaceno + k úhradě 0) — jen informace, DPH platí normálně
+  f.paidFlag = !f.advance && f.due!=null && Math.abs(f.due)<0.005 && (f.paid==null || f.paid>0.005);
 
   // --- zaúčtování (default; přepíše šablona dodavatele nebo ruční volba) ---
   f.predkontace = POH_PREDKONTACE;
@@ -512,7 +520,7 @@ function render(){
 function paintValidation(v){
   const b=$('banner'); if(!b) return;
   if(F.advance){ b.className='banner bad'; b.innerHTML='⚠ <b>Vyúčtování zálohy / K úhradě 0.</b> DPH bylo uplatněno na zálohové faktuře — tenhle doklad je potřeba zpracovat <b>ručně</b> (vazba na zálohovou fakturu). Auto‑generování je zablokované.'; }
-  else if(v.canAuto){ b.className='banner ok'; b.innerHTML='✓ <b>Sedí.</b> Aritmetika DPH i celková částka odpovídají, datumy i IČO OK. Zkontroluj a vygeneruj.'; }
+  else if(v.canAuto){ b.className='banner ok'; b.innerHTML='✓ <b>Sedí.</b> Aritmetika DPH i celková částka odpovídají, datumy i IČO OK.'+(F.paidFlag?' <b>Faktura je již uhrazena</b> (zaplaceno'+(F.paid!=null?' '+gnum(F.paid):'')+', k úhradě 0).':'')+' Zkontroluj a vygeneruj.'; }
   else { b.className='banner warn'; b.innerHTML='⚠ <b>K revizi.</b> '+[
       (v.sumBase<0.005)?'chybí rekapitulace DPH — doplň ji („◎ DPH z náhledu" nebo ručně)':(v.dphState!=='ok'?'DPH nesedí (základ×sazba≠DPH nebo součet≠celkem)':''),
       !v.datesOk?'chybí datum':'',
