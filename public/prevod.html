@@ -519,15 +519,14 @@ function reconcile(H,items){
 function buildGpc(H,items){
   const acc=accGpc(H.account||'');
   const hal=(v)=>zero(Math.round(Math.abs(v)*100),14);
-  const bankName=pad(H.bank||'',14);
   const l074=()=>{
     let f='074'+acc+pad(deacc(H.name||''),20)+ddmmrr(H.from);
     f+=hal(H.opening)+(H.opening<0?'-':'+');
     f+=hal(H.closing)+(H.closing<0?'-':'+');
-    f+=zero(Math.round((H.expense||0)*100),14)+'0';
-    f+=zero(Math.round((H.income||0)*100),14)+'0';
-    f+=String(H.stmtNo||0).padStart(3,'0')+ddmmrr(H.to)+bankName;
-    return f.slice(0,128).padEnd(128,' ');
+    f+=zero(Math.round((H.expense||0)*100),14)+'+';   // obraty: znaménko dle ABO specifikace
+    f+=zero(Math.round((H.income||0)*100),14)+'+';
+    f+=String(H.stmtNo||0).padStart(3,'0')+ddmmrr(H.to);
+    return f.slice(0,128).padEnd(128,' ');            // výplň = mezery (dle specifikace)
   };
   const l075=(t)=>{
     let f='075'+acc+accGpc(t.proti)+zero((t.kod||'').replace(/\D/g,''),13);
@@ -536,7 +535,8 @@ function buildGpc(H,items){
     f+=ddmmrr(t.valuta||t.book)+pad(t.party||'',20)+'00203'+ddmmrr(t.book||t.valuta);
     return f.slice(0,128).padEnd(128,' ');
   };
-  return [l074(),...items.map(l075)].join('\n')+'\n';
+  // ABO/GPC vyžaduje CRLF (bez něj Pohoda hlásí "soubor neobsahuje žádná data")
+  return [l074(),...items.map(l075)].join('\r\n')+'\r\n';
 }
 
 /* ---------- render ---------- */
